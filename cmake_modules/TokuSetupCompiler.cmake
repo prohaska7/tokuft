@@ -139,6 +139,7 @@ prepend_cflags_if_supported_remove_unsupported(
 if (CMAKE_CXX_COMPILER_ID MATCHES GNU)
   prepend_cflags_if_supported_remove_unsupported(
     -Wno-maybe-uninitialized
+    -Wno-error=class-memaccess
   )
 endif ()
 
