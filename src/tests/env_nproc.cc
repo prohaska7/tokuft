@@ -76,15 +76,20 @@ int test_main (int argc, char * const argv[]) {
     toku_os_recursive_delete(TOKU_TEST_FILENAME);
     r = toku_os_mkdir(TOKU_TEST_FILENAME, S_IRWXU+S_IRWXG+S_IRWXO);
 
-    struct rlimit nproc_rlimit;
-    r = getrlimit(RLIMIT_NPROC, &nproc_rlimit);
+    struct rlimit a;
+    r = getrlimit(RLIMIT_NPROC, &a);
     assert(r == 0);
 
-    nproc_rlimit.rlim_cur = limit;
-    r = setrlimit(RLIMIT_NPROC, &nproc_rlimit);
+    struct rlimit b = { (rlim_t) limit, a.rlim_max };
+    r = setrlimit(RLIMIT_NPROC, &b);
     assert(r == 0);
 
     env_open_close();
+
+    // restore the default large enough fd space
+    // to avoid an abort in the leak sanitizer
+    r = setrlimit(RLIMIT_NPROC, &a);
+    assert(r == 0);
 
     return 0;
 }
