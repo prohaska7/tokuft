@@ -41,6 +41,8 @@ Copyright (c) 2006, 2015, Percona and/or its affiliates. All rights reserved.
 #include <toku_assert.h>
 #include <toku_stdint.h>
 #include <toku_os.h>
+#include <unistd.h>
+#include <vector>
 
 // verify that we can compute processor frequency even when out of file descriptors.
 
@@ -58,11 +60,25 @@ static void run_test(void) {
 
 int main(void) {
     run_test();
+
+    // consume all of the unused file descriptors
+    // keep track of all of the file descriptors so we can close them before end of test
+    // otherwise, the leak sanitizer aborts
+    std::vector<int> fds;
     while (1) {
         int fd = open("/dev/null", O_RDONLY);
         if (fd < 0)
             break;
+        fds.push_back(fd);
     }
+
     run_test();
+
+    // close all of the test file descriptors
+    for (auto fd : fds) {
+        int r = close(fd);
+        assert(r == 0);
+    }
+
     return 0;
 }
