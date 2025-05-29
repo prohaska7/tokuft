@@ -294,11 +294,11 @@ void locktree_manager::escalate_all_locktrees(void) {
 }
 
 void locktree_manager::note_mem_used(uint64_t mem_used) {
-    (void) toku_sync_fetch_and_add(&m_current_lock_memory, mem_used);
+    m_current_lock_memory += mem_used;
 }
 
 void locktree_manager::note_mem_released(uint64_t mem_released) {
-    uint64_t old_mem_used = toku_sync_fetch_and_sub(&m_current_lock_memory, mem_released);
+    uint64_t old_mem_used = m_current_lock_memory.fetch_sub(mem_released);
     invariant(old_mem_used >= mem_released);
 }
 
