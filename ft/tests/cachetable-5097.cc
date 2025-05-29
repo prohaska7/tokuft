@@ -42,9 +42,9 @@ CACHEFILE f1;
 CACHEFILE f2;
 
 bool check_flush;
-bool dirty_flush_called;
-bool check_pe_callback;
-bool pe_callback_called;
+std::atomic_bool dirty_flush_called;
+std::atomic_bool check_pe_callback;
+std::atomic_bool pe_callback_called;
 bool enable_partial_eviction;
 
 CACHETABLE ct;
