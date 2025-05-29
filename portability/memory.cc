@@ -76,7 +76,7 @@ static realloc_fun_t t_realloc = 0;
 static realloc_aligned_fun_t t_realloc_aligned = 0;
 static realloc_fun_t t_xrealloc = 0;
 
-static LOCAL_MEMORY_STATUS_S status;
+static LOCAL_MEMORY_STATUS_S memory_status;
 int toku_memory_do_stats = 0;
 
 static bool memory_startup_complete = false;
@@ -97,16 +97,16 @@ toku_memory_startup(void) {
     size_t mmap_threshold = 64 * 1024; // 64K and larger should be malloced with mmap().
     int success = mallopt(M_MMAP_THRESHOLD, mmap_threshold);
     if (success) {
-        status.mallocator_version = "libc";
-        status.mmap_threshold = mmap_threshold;
+        memory_status.mallocator_version = "libc";
+        memory_status.mmap_threshold = mmap_threshold;
     } else {
         result = EINVAL;
     }
     assert(result == 0);
 #else
     // just a guess
-    status.mallocator_version = "darwin";
-    status.mmap_threshold = 16 * 1024;
+    memory_status.mallocator_version = "darwin";
+    memory_status.mmap_threshold = 16 * 1024;
 #endif
 
     // jemalloc has a mallctl function, while libc malloc does not.  we can check if jemalloc 
@@ -116,17 +116,17 @@ toku_memory_startup(void) {
     mallctl_fun_t mallctl_f;
     mallctl_f = (mallctl_fun_t) dlsym(RTLD_DEFAULT, "mallctl");
     if (mallctl_f) { // jemalloc is loaded
-        size_t version_length = sizeof status.mallocator_version;
-        result = mallctl_f("version", &status.mallocator_version, &version_length, NULL, 0);
+        size_t version_length = sizeof memory_status.mallocator_version;
+        result = mallctl_f("version", &memory_status.mallocator_version, &version_length, NULL, 0);
         assert(result == 0);
         if (result == 0) {
             size_t lg_chunk; // log2 of the mmap threshold
             size_t lg_chunk_length = sizeof lg_chunk;
             result  = mallctl_f("opt.lg_chunk", &lg_chunk, &lg_chunk_length, NULL, 0);
             if (result == 0) {
-                status.mmap_threshold = 1 << lg_chunk;
+                memory_status.mmap_threshold = 1 << lg_chunk;
             } else {
-                status.mmap_threshold = 1 << 22;
+                memory_status.mmap_threshold = 1 << 22;
                 result = 0;
             }
         }
@@ -147,7 +147,7 @@ toku_memory_shutdown(void) {
 
 void 
 toku_memory_get_status(LOCAL_MEMORY_STATUS s) {
-    *s = status;
+    *s = memory_status;
 }
 
 // jemalloc's malloc_usable_size does not work with a NULL pointer, so we implement a version that works
@@ -159,17 +159,17 @@ my_malloc_usable_size(void *p) {
 // Note that max_in_use may be slightly off because use of max_in_use is not thread-safe.
 // It is not worth the overhead to make it completely accurate, but
 // this logic is intended to guarantee that it increases monotonically.
-// Note that status.sum_used and status.sum_freed increase monotonically
-// and that status.max_in_use is declared volatile.
+// Note that memory_status.sum_used and memory_status.sum_freed increase monotonically
+// and that memory_status.max_in_use is declared volatile.
 static inline void 
 set_max(uint64_t sum_used, uint64_t sum_freed) {
     if (sum_used >= sum_freed) {
         uint64_t in_use = sum_used - sum_freed;
         uint64_t old_max;
         do {
-            old_max = status.max_in_use;
+            old_max = memory_status.max_in_use;
         } while (old_max < in_use &&
-                 !toku_sync_bool_compare_and_swap(&status.max_in_use, old_max, in_use));
+                 !toku_sync_bool_compare_and_swap(&memory_status.max_in_use, old_max, in_use));
     }
 }
 
@@ -179,7 +179,7 @@ size_t
 toku_memory_footprint_given_usable_size(size_t touched, size_t usable)
 {
     size_t pagesize = toku_os_get_pagesize();
-    if (usable >= status.mmap_threshold) {
+    if (usable >= memory_status.mmap_threshold) {
         int num_pages = (touched + pagesize) / pagesize;
         return num_pages * pagesize;
     }
@@ -205,22 +205,22 @@ toku_malloc(size_t size) {
     }
 #endif
 
-    if (size > status.max_requested_size) {
-        status.max_requested_size = size;
+    if (size > memory_status.max_requested_size) {
+        memory_status.max_requested_size = size;
     }
     void *p = t_malloc ? t_malloc(size) : os_malloc(size);
     if (p) {
         TOKU_ANNOTATE_NEW_MEMORY(p, size); // see #4671 and https://bugs.kde.org/show_bug.cgi?id=297147
         if (toku_memory_do_stats) {
             size_t used = my_malloc_usable_size(p);
-            toku_sync_add_and_fetch(&status.malloc_count, 1);
-            toku_sync_add_and_fetch(&status.requested,size);
-            toku_sync_add_and_fetch(&status.used, used);
-            set_max(status.used, status.freed);
+            toku_sync_add_and_fetch(&memory_status.malloc_count, 1);
+            toku_sync_add_and_fetch(&memory_status.requested,size);
+            toku_sync_add_and_fetch(&memory_status.used, used);
+            set_max(memory_status.used, memory_status.freed);
         }
     } else {
-        toku_sync_add_and_fetch(&status.malloc_fail, 1);
-        status.last_failed_size = size;
+        toku_sync_add_and_fetch(&memory_status.malloc_fail, 1);
+        memory_status.last_failed_size = size;
     }
   return p;
 }
@@ -232,22 +232,22 @@ void *toku_malloc_aligned(size_t alignment, size_t size) {
     }
 #endif
 
-    if (size > status.max_requested_size) {
-        status.max_requested_size = size;
+    if (size > memory_status.max_requested_size) {
+        memory_status.max_requested_size = size;
     }
     void *p = t_malloc_aligned ? t_malloc_aligned(alignment, size) : os_malloc_aligned(alignment, size);
     if (p) {
         TOKU_ANNOTATE_NEW_MEMORY(p, size); // see #4671 and https://bugs.kde.org/show_bug.cgi?id=297147
         if (toku_memory_do_stats) {
             size_t used = my_malloc_usable_size(p);
-            toku_sync_add_and_fetch(&status.malloc_count, 1);
-            toku_sync_add_and_fetch(&status.requested,size);
-            toku_sync_add_and_fetch(&status.used, used);
-            set_max(status.used, status.freed);
+            toku_sync_add_and_fetch(&memory_status.malloc_count, 1);
+            toku_sync_add_and_fetch(&memory_status.requested,size);
+            toku_sync_add_and_fetch(&memory_status.used, used);
+            set_max(memory_status.used, memory_status.freed);
         }
     } else {
-        toku_sync_add_and_fetch(&status.malloc_fail, 1);
-        status.last_failed_size = size;
+        toku_sync_add_and_fetch(&memory_status.malloc_fail, 1);
+        memory_status.last_failed_size = size;
     }
   return p;
 }
@@ -271,23 +271,23 @@ toku_realloc(void *p, size_t size) {
     }
 #endif
 
-    if (size > status.max_requested_size) {
-        status.max_requested_size = size;
+    if (size > memory_status.max_requested_size) {
+        memory_status.max_requested_size = size;
     }
     size_t used_orig = p ? my_malloc_usable_size(p) : 0;
     void *q = t_realloc ? t_realloc(p, size) : os_realloc(p, size);
     if (q) {
         if (toku_memory_do_stats) {
             size_t used = my_malloc_usable_size(q);
-            toku_sync_add_and_fetch(&status.realloc_count, 1);
-            toku_sync_add_and_fetch(&status.requested, size);
-            toku_sync_add_and_fetch(&status.used, used);
-            toku_sync_add_and_fetch(&status.freed, used_orig);
-            set_max(status.used, status.freed);
+            toku_sync_add_and_fetch(&memory_status.realloc_count, 1);
+            toku_sync_add_and_fetch(&memory_status.requested, size);
+            toku_sync_add_and_fetch(&memory_status.used, used);
+            toku_sync_add_and_fetch(&memory_status.freed, used_orig);
+            set_max(memory_status.used, memory_status.freed);
         }
     } else {
-        toku_sync_add_and_fetch(&status.realloc_fail, 1);
-        status.last_failed_size = size;
+        toku_sync_add_and_fetch(&memory_status.realloc_fail, 1);
+        memory_status.last_failed_size = size;
     }
     return q;
 }
@@ -302,23 +302,23 @@ void *toku_realloc_aligned(size_t alignment, void *p, size_t size) {
     }
 #endif
 
-    if (size > status.max_requested_size) {
-        status.max_requested_size = size;
+    if (size > memory_status.max_requested_size) {
+        memory_status.max_requested_size = size;
     }
     size_t used_orig = p ? my_malloc_usable_size(p) : 0;
     void *q = t_realloc_aligned ? t_realloc_aligned(alignment, p, size) : os_realloc_aligned(alignment, p, size);
     if (q) {
         if (toku_memory_do_stats) {
             size_t used = my_malloc_usable_size(q);
-            toku_sync_add_and_fetch(&status.realloc_count, 1);
-            toku_sync_add_and_fetch(&status.requested, size);
-            toku_sync_add_and_fetch(&status.used, used);
-            toku_sync_add_and_fetch(&status.freed, used_orig);
-            set_max(status.used, status.freed);
+            toku_sync_add_and_fetch(&memory_status.realloc_count, 1);
+            toku_sync_add_and_fetch(&memory_status.requested, size);
+            toku_sync_add_and_fetch(&memory_status.used, used);
+            toku_sync_add_and_fetch(&memory_status.freed, used_orig);
+            set_max(memory_status.used, memory_status.freed);
         }
     } else {
-        toku_sync_add_and_fetch(&status.realloc_fail, 1);
-        status.last_failed_size = size;
+        toku_sync_add_and_fetch(&memory_status.realloc_fail, 1);
+        memory_status.last_failed_size = size;
     }
     return q;
 }
@@ -350,8 +350,8 @@ toku_free(void *p) {
     if (p) {
         if (toku_memory_do_stats) {
             size_t used = my_malloc_usable_size(p);
-            toku_sync_add_and_fetch(&status.free_count, 1);
-            toku_sync_add_and_fetch(&status.freed, used);
+            toku_sync_add_and_fetch(&memory_status.free_count, 1);
+            toku_sync_add_and_fetch(&memory_status.freed, used);
         }
         if (t_free)
             t_free(p);
@@ -368,21 +368,21 @@ toku_xmalloc(size_t size) {
     }
 #endif
 
-    if (size > status.max_requested_size) {
-        status.max_requested_size = size;
+    if (size > memory_status.max_requested_size) {
+        memory_status.max_requested_size = size;
     }
     void *p = t_xmalloc ? t_xmalloc(size) : os_malloc(size);
     if (p == NULL) {  // avoid function call in common case
-        status.last_failed_size = size;
+        memory_status.last_failed_size = size;
         resource_assert(p);
     }
     TOKU_ANNOTATE_NEW_MEMORY(p, size); // see #4671 and https://bugs.kde.org/show_bug.cgi?id=297147
     if (toku_memory_do_stats) {
         size_t used = my_malloc_usable_size(p);
-        toku_sync_add_and_fetch(&status.malloc_count, 1);
-        toku_sync_add_and_fetch(&status.requested, size);
-        toku_sync_add_and_fetch(&status.used, used);
-        set_max(status.used, status.freed);
+        toku_sync_add_and_fetch(&memory_status.malloc_count, 1);
+        toku_sync_add_and_fetch(&memory_status.requested, size);
+        toku_sync_add_and_fetch(&memory_status.used, used);
+        set_max(memory_status.used, memory_status.freed);
     }
     return p;
 }
@@ -398,20 +398,20 @@ void* toku_xmalloc_aligned(size_t alignment, size_t size)
     }
 #endif
 
-    if (size > status.max_requested_size) {
-        status.max_requested_size = size;
+    if (size > memory_status.max_requested_size) {
+        memory_status.max_requested_size = size;
     }
     void *p = t_xmalloc_aligned ? t_xmalloc_aligned(alignment, size) : os_malloc_aligned(alignment,size);
     if (p == NULL && size != 0) {
-        status.last_failed_size = size;
+        memory_status.last_failed_size = size;
         resource_assert(p);
     }
     if (toku_memory_do_stats) {
         size_t used = my_malloc_usable_size(p);
-        toku_sync_add_and_fetch(&status.malloc_count, 1);
-        toku_sync_add_and_fetch(&status.requested, size);
-        toku_sync_add_and_fetch(&status.used, used);
-        set_max(status.used, status.freed);
+        toku_sync_add_and_fetch(&memory_status.malloc_count, 1);
+        toku_sync_add_and_fetch(&memory_status.requested, size);
+        toku_sync_add_and_fetch(&memory_status.used, used);
+        set_max(memory_status.used, memory_status.freed);
     }
     return p;
 }
@@ -435,22 +435,22 @@ toku_xrealloc(void *v, size_t size) {
     }
 #endif
 
-    if (size > status.max_requested_size) {
-        status.max_requested_size = size;
+    if (size > memory_status.max_requested_size) {
+        memory_status.max_requested_size = size;
     }
     size_t used_orig = v ? my_malloc_usable_size(v) : 0;
     void *p = t_xrealloc ? t_xrealloc(v, size) : os_realloc(v, size);
     if (p == 0) {  // avoid function call in common case
-        status.last_failed_size = size;
+        memory_status.last_failed_size = size;
         resource_assert(p);
     }
     if (toku_memory_do_stats) {
         size_t used = my_malloc_usable_size(p);
-        toku_sync_add_and_fetch(&status.realloc_count, 1);
-        toku_sync_add_and_fetch(&status.requested, size);
-        toku_sync_add_and_fetch(&status.used, used);
-        toku_sync_add_and_fetch(&status.freed, used_orig);
-        set_max(status.used, status.freed);
+        toku_sync_add_and_fetch(&memory_status.realloc_count, 1);
+        toku_sync_add_and_fetch(&memory_status.requested, size);
+        toku_sync_add_and_fetch(&memory_status.used, used);
+        toku_sync_add_and_fetch(&memory_status.freed, used_orig);
+        set_max(memory_status.used, memory_status.freed);
     }
     return p;
 }
@@ -514,5 +514,5 @@ toku_set_func_free(free_fun_t f) {
 void __attribute__((constructor)) toku_memory_helgrind_ignore(void);
 void
 toku_memory_helgrind_ignore(void) {
-    TOKU_VALGRIND_HG_DISABLE_CHECKING(&status, sizeof status);
+    TOKU_VALGRIND_HG_DISABLE_CHECKING(&memory_status, sizeof memory_status);
 }
