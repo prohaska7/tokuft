@@ -132,11 +132,11 @@ void lt_lock_request_info::destroy(void) {
 }
 
 void locktree::add_reference(void) {
-    (void)toku_sync_add_and_fetch(&m_reference_count, 1);
+    m_reference_count += 1; // add_fetch(1);
 }
 
 uint32_t locktree::release_reference(void) {
-    return toku_sync_sub_and_fetch(&m_reference_count, 1);
+    return m_reference_count -= 1; // sub_fetch(1);
 }
 
 uint32_t locktree::get_reference_count(void) {
@@ -247,7 +247,7 @@ void locktree::sto_end(void) {
 void locktree::sto_end_early_no_accounting(void *prepared_lkr) {
     sto_migrate_buffer_ranges_to_tree(prepared_lkr);
     sto_end();
-    toku_unsafe_set(m_sto_score, 0);
+    m_sto_score = 0; // toku_unsafe_set(m_sto_score, 0);
 }
 
 void locktree::sto_end_early(void *prepared_lkr) {
@@ -302,7 +302,7 @@ void locktree::sto_migrate_buffer_ranges_to_tree(void *prepared_lkr) {
 bool locktree::sto_try_acquire(void *prepared_lkr,
                                TXNID txnid,
                                const DBT *left_key, const DBT *right_key) {
-    if (m_rangetree->is_empty() && m_sto_buffer.is_empty() && toku_unsafe_fetch(m_sto_score) >= STO_SCORE_THRESHOLD) {
+    if (m_rangetree->is_empty() && m_sto_buffer.is_empty() && m_sto_score >= STO_SCORE_THRESHOLD) {
         // We can do the optimization because the rangetree is empty, and
         // we know its worth trying because the sto score is big enough.
         sto_begin(txnid);
@@ -512,7 +512,7 @@ bool locktree::sto_txnid_is_valid_unsafe(void) const {
 }
 
 int locktree::sto_get_score_unsafe(void) const {
-    return toku_unsafe_fetch(m_sto_score);
+    return m_sto_score;
 }
 
 bool locktree::sto_try_release(TXNID txnid) {
@@ -557,8 +557,8 @@ void locktree::release_locks(TXNID txnid, const range_buffer *ranges) {
         // the threshold and we'll try the optimization again. This
         // is how a previously multithreaded system transitions into
         // a single threaded system that benefits from the optimization.
-        if (toku_unsafe_fetch(m_sto_score) < STO_SCORE_THRESHOLD) {
-            toku_sync_fetch_and_add(&m_sto_score, 1);
+        if (m_sto_score < STO_SCORE_THRESHOLD) {
+            m_sto_score.fetch_add(1); // toku_sync_fetch_and_add(&m_sto_score, 1);
         }
     }
 }
