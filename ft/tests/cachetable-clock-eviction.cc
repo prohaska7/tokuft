@@ -39,9 +39,9 @@ Copyright (c) 2006, 2015, Percona and/or its affiliates. All rights reserved.
 #include "test.h"
 
 int num_entries;
-bool flush_may_occur;
+std::atomic_bool flush_may_occur;
 int expected_flushed_key;
-bool check_flush;
+std::atomic_bool check_flush;
 
 static void
 flush (CACHEFILE f __attribute__((__unused__)),
