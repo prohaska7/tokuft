@@ -54,6 +54,11 @@ Copyright (c) 2006, 2015, Percona and/or its affiliates. All rights reserved.
 // ones automatically incremented by the frwlock get handled properly.
 #include <util/partitioned_counter.h>
 
+// Keep id's of all of the background threads that this test creates
+// so that we can join with all of them right before cleanup.  
+#include <vector>
+std::vector<toku_pthread_t> all_threads;
+
 toku_mutex_t mutex;
 toku::frwlock w;
 
@@ -104,7 +109,7 @@ static void launch_cheap_waiter(void) {
     int r = toku_pthread_create(
         toku_uninstrumented, &tid, nullptr, do_cheap_wait, nullptr);
     assert_zero(r);
-    toku_pthread_detach(tid);
+    all_threads.push_back(tid);
     sleep(1);
 }
 
@@ -113,7 +118,7 @@ static void launch_expensive_waiter(void) {
     int r = toku_pthread_create(
         toku_uninstrumented, &tid, nullptr, do_expensive_wait, nullptr);
     assert_zero(r);
-    toku_pthread_detach(tid);
+    all_threads.push_back(tid);
     sleep(1);
 }
 
@@ -122,7 +127,7 @@ static void launch_reader(void) {
     int r = toku_pthread_create(
         toku_uninstrumented, &tid, nullptr, do_read_wait, nullptr);
     assert_zero(r);
-    toku_pthread_detach(tid);
+    all_threads.push_back(tid);
     sleep(1);
 }
 
@@ -236,6 +241,12 @@ static void test_write_cheapness(void) {
     assert(locks_are_expensive());
     release_write_lock();
     sleep(1);
+
+    for (auto tid : all_threads) {
+        void *retval;
+        int r = toku_pthread_join(tid, &retval);
+        assert(r == 0);
+    }
 
     w.deinit();
     toku_mutex_destroy(&mutex);
