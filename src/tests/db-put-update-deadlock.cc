@@ -58,7 +58,7 @@ static void read_row(DB *db, DB_TXN *txn, int k, int expect_r) {
     toku_free(value.data);
 }
 
-static volatile int n_txns;
+static std::atomic_int n_txns;
 
 struct write_one_arg {
     DB_TXN *txn;
@@ -85,7 +85,7 @@ static void *write_one_f(void *arg) {
     } else {
         r = txn->abort(txn); assert(r == 0);
     }
-    (void) toku_sync_fetch_and_sub(&n_txns, 1);
+    n_txns -= 1;
 
     return arg;
 }

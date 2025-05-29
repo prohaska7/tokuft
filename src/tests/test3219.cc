@@ -129,8 +129,7 @@ finish (void) {
     r = env->close(env, 0);                                                           CKERR(r);
 }
 
-
-volatile int finished = false;
+std::atomic_int finished (false);
 
 // Thread A performs checkpoints
 static void*

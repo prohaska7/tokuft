@@ -67,15 +67,15 @@ bool upgrade_test = false;
 
 // Code for showing memory footprint information.
 pthread_mutex_t my_lock = PTHREAD_MUTEX_INITIALIZER;
-size_t hiwater;
-size_t water;
+std::atomic_size_t hiwater;
+std::atomic_size_t water;
 size_t hiwater_start;
 static long long mcount = 0, fcount=0;
 
 
 static void my_free(void*p) {
     if (p) {
-        water-=toku_malloc_usable_size(p);
+        water -= toku_malloc_usable_size(p);
     }
     free(p);
 }
@@ -84,7 +84,8 @@ static void *my_malloc(size_t size) {
     void *r = malloc(size);
     if (r) {
         water += toku_malloc_usable_size(r);
-        if (water>hiwater) hiwater=water;
+        if (water>hiwater)
+            hiwater=water.load();
     }
     return r;
 }
@@ -446,10 +447,10 @@ static void test_loader(DB **dbs)
     r = env->txn_begin(env, NULL, &txn, 0);
     CKERR(r);
     hiwater_start = hiwater;
-    if (footprint_print)  printf("%s:%d Hiwater=%ld water=%ld\n", __FILE__, __LINE__, hiwater, water);
+    if (footprint_print)  printf("%s:%d Hiwater=%ld water=%ld\n", __FILE__, __LINE__, hiwater.load(), water.load());
     r = env->create_loader(env, txn, &loader, dbs[0], NUM_DBS, dbs, db_flags, dbt_flags, loader_flags);
     CKERR(r);
-    if (footprint_print)  printf("%s:%d Hiwater=%ld water=%ld\n", __FILE__, __LINE__, hiwater, water);
+    if (footprint_print)  printf("%s:%d Hiwater=%ld water=%ld\n", __FILE__, __LINE__, hiwater.load(), water.load());
     r = loader->set_error_callback(loader, NULL, NULL);
     CKERR(r);
     r = loader->set_poll_function(loader, poll_function, expect_poll_void);
@@ -483,9 +484,9 @@ static void test_loader(DB **dbs)
 
     // close the loader
     if ( verbose ) printf("%9.6fs closing\n", elapsed_time());
-    if (footprint_print) printf("%s:%d Hiwater=%ld water=%ld\n", __FILE__, __LINE__, hiwater, water);
+    if (footprint_print) printf("%s:%d Hiwater=%ld water=%ld\n", __FILE__, __LINE__, hiwater.load(), water.load());
     r = loader->close(loader);
-    if (footprint_print) printf("%s:%d Hiwater=%ld water=%ld (extra hiwater=%ldM)\n", __FILE__, __LINE__, hiwater, water, (hiwater-hiwater_start)/(1024*1024));
+    if (footprint_print) printf("%s:%d Hiwater=%ld water=%ld (extra hiwater=%ldM)\n", __FILE__, __LINE__, hiwater.load(), water.load(), (hiwater-hiwater_start)/(1024*1024));
     if ( verbose ) printf("%9.6fs done\n",    elapsed_time());
     CKERR2s(r,0,TOKUDB_CANCELED);
 
@@ -625,7 +626,7 @@ int test_main(int argc, char * const *argv) {
 	toku_free(progress_infos);
     }
     if (footprint_print) {
-        printf("%s:%d Hiwater=%ld water=%ld (extra hiwater=%ldM) mcount=%lld fcount=%lld\n", __FILE__, __LINE__, hiwater, water, (hiwater-hiwater_start)/(1024*1024), mcount, fcount);
+        printf("%s:%d Hiwater=%ld water=%ld (extra hiwater=%ldM) mcount=%lld fcount=%lld\n", __FILE__, __LINE__, hiwater.load(), water.load(), (hiwater-hiwater_start)/(1024*1024), mcount, fcount);
         typedef void (*malloc_stats_fun_t)(void);
         malloc_stats_fun_t malloc_stats_f = (malloc_stats_fun_t) dlsym(RTLD_DEFAULT, "malloc_stats");
         if (malloc_stats_f) {
