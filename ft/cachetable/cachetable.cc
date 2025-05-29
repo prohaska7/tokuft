@@ -3796,7 +3796,7 @@ void evictor::change_pair_attr(PAIR_ATTR old_attr, PAIR_ATTR new_attr) {
 // the size of the cachetable.
 //
 void evictor::add_to_size_current(long size) {
-    (void) toku_sync_fetch_and_add(&m_size_current, size);
+    m_size_current.fetch_add(size); // (void) toku_sync_fetch_and_add(&m_size_current, size);
 }
 
 //
@@ -3804,7 +3804,7 @@ void evictor::add_to_size_current(long size) {
 // approximation of the cachetable size.
 //
 void evictor::remove_from_size_current(long size) {
-    (void) toku_sync_fetch_and_sub(&m_size_current, size);
+    m_size_current.fetch_sub(size); // (void) toku_sync_fetch_and_sub(&m_size_current, size);
 }
 
 //
@@ -3836,7 +3836,7 @@ uint64_t evictor::reserve_memory(double fraction, uint64_t upper_bound) {
         reserved_memory = upper_bound;
     }
     m_size_reserved += reserved_memory;
-    (void) toku_sync_fetch_and_add(&m_size_current, reserved_memory);
+    m_size_current.fetch_add(reserved_memory); // (void) toku_sync_fetch_and_add(&m_size_current, reserved_memory);
     this->signal_eviction_thread_locked();  
     toku_mutex_unlock(&m_ev_thread_lock);
 
@@ -3850,7 +3850,7 @@ uint64_t evictor::reserve_memory(double fraction, uint64_t upper_bound) {
 // TODO: (Zardosht) comment this function
 //
 void evictor::release_reserved_memory(uint64_t reserved_memory){
-    (void) toku_sync_fetch_and_sub(&m_size_current, reserved_memory);
+    m_size_current.fetch_sub(reserved_memory); // (void) toku_sync_fetch_and_sub(&m_size_current, reserved_memory);
     toku_mutex_lock(&m_ev_thread_lock);    
     m_size_reserved -= reserved_memory;
     // signal the eviction thread in order to possibly wake up sleeping clients
