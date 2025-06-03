@@ -77,7 +77,7 @@ Copyright (c) 2006, 2015, Percona and/or its affiliates. All rights reserved.
 static const size_t min_val_size = sizeof(int32_t);
 static const size_t min_key_size = sizeof(int32_t);
 
-std::atomic_bool run_test; // should be volatile since we are communicating through this variable.
+std::atomic_bool run_test;
 
 typedef struct arg *ARG;
 typedef int (*operation_t)(DB_TXN *txn, ARG arg, void *operation_extra, void *stats_extra);
