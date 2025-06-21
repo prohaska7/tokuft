@@ -61,7 +61,7 @@ void lock_request_unit_test::run(void) {
     r = lt.acquire_write_lock(txnid_b, zero, two, nullptr, false);
     invariant_zero(r);
 
-    lt_lock_request_info *info = lt.get_lock_request_info();
+    lock_request_info *info = lt.get_lock_request_info();
 
     // start a lock request for 1,1
     // it should fail. the request should be stored and in the pending state.

@@ -47,7 +47,7 @@ void locktree_unit_test::test_create_destroy(void) {
 
     lt.create(nullptr, dict_id, dbt_comparator);
 
-    lt_lock_request_info *info = lt.get_lock_request_info();
+    lock_request_info *info = lt.get_lock_request_info();
     invariant_notnull(info);
     toku_mutex_lock(&info->mutex);
     toku_mutex_unlock(&info->mutex);

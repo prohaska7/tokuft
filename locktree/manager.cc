@@ -239,7 +239,7 @@ void locktree_manager::release_lt(locktree *lt) {
                     locktree_map_remove(lt);
                     do_destroy = true;
                 }
-                m_lt_counters.add(lt->get_lock_request_info()->counters);
+                m_lt_counters.add(lt->get_lock_request_info()->get_counters());
             }
         }
         mutex_unlock();
@@ -294,7 +294,7 @@ void locktree_manager::escalate_all_locktrees(void) {
 }
 
 void locktree_manager::note_mem_used(uint64_t mem_used) {
-    m_current_lock_memory += mem_used;
+    m_current_lock_memory.fetch_add(mem_used);
 }
 
 void locktree_manager::note_mem_released(uint64_t mem_released) {
@@ -320,20 +320,8 @@ int locktree_manager::iterate_pending_lock_requests(lock_request_iterate_callbac
         r = m_locktree_map.fetch(i, &lt);
         invariant_zero(r);
 
-        struct lt_lock_request_info *info = lt->get_lock_request_info();
-        toku_mutex_lock(&info->mutex);
-
-        size_t num_requests = info->pending_lock_requests.size();
-        for (size_t k = 0; k < num_requests && r == 0; k++) {
-            lock_request *req;
-            r = info->pending_lock_requests.fetch(k, &req);
-            invariant_zero(r);
-            r = callback(lt->get_dict_id(), req->get_txnid(),
-                         req->get_left_key(), req->get_right_key(),
-                         req->get_conflicting_txnid(), req->get_start_time(), extra);
-        }
-
-        toku_mutex_unlock(&info->mutex);
+        lock_request_info *info = lt->get_lock_request_info();
+        r = info->iterate_pending_lock_requests(callback, extra);
     }
     mutex_unlock();
     return r;
@@ -472,11 +460,8 @@ void locktree_manager::get_status(LTM_STATUS statp) {
             locktree *lt;
             int r = m_locktree_map.fetch(i, &lt);
             invariant_zero(r);
-            if (toku_mutex_trylock(&lt->m_lock_request_info.mutex) == 0) {
-                lock_requests_pending += lt->m_lock_request_info.pending_lock_requests.size();
-                lt_counters.add(lt->get_lock_request_info()->counters);
-                toku_mutex_unlock(&lt->m_lock_request_info.mutex);
-            }
+            lock_request_info *info = lt->get_lock_request_info();
+            info->add_status(&lock_requests_pending, &lt_counters);
             sto_num_eligible += lt->sto_txnid_is_valid_unsafe() ? 1 : 0;
             sto_end_early_count += lt->m_sto_end_early_count;
             sto_end_early_time += lt->m_sto_end_early_time;
@@ -505,7 +490,8 @@ void locktree_manager::kill_waiter(void *extra) {
         locktree *lt;
         r = m_locktree_map.fetch(i, &lt);
         invariant_zero(r);
-        lock_request::kill_waiter(lt, extra);
+        lock_request_info *info = lt->get_lock_request_info();
+        info->kill_waiter(extra);
     }
     mutex_unlock();
 }

@@ -127,7 +127,7 @@ public:
     static void retry_all_lock_requests(
         locktree *lt,
         void (*after_retry_test_callback)(void) = nullptr);
-    static void retry_all_lock_requests_info(lt_lock_request_info *info);
+    static void retry_all_lock_requests_info(lock_request_info *info);
 
     void set_start_test_callback(void (*f)(void));
     void set_start_before_pending_test_callback(void (*f)(void));
@@ -174,7 +174,7 @@ public:
 
     // the lock request info state stored in the
     // locktree that this lock request is for.
-    struct lt_lock_request_info *m_info;
+    lock_request_info *m_info;
 
     void *m_extra;
 
@@ -183,18 +183,6 @@ public:
     int retry(void);
 
     void complete(int complete_r);
-
-    // effect: Finds another lock request by txnid.
-    // requires: The lock request info mutex is held
-    lock_request *find_lock_request(const TXNID &txnid);
-
-    // effect: Insert this lock request into the locktree's set.
-    // requires: the locktree's mutex is held
-    void insert_into_lock_requests(void);
-
-    // effect: Removes this lock request from the locktree's set.
-    // requires: The lock request info mutex is held
-    void remove_from_lock_requests(void);
 
     // effect: Asks this request's locktree which txnids are preventing
     //         us from getting the lock described by this request.
@@ -210,12 +198,11 @@ public:
 
     void copy_keys(void);
 
-    static int find_by_txnid(lock_request *const &request, const TXNID &txnid);
-
     void (*m_start_test_callback)(void);
     void (*m_start_before_pending_test_callback)(void);
     void (*m_retry_test_callback)(void);
 
+    friend class lock_request_info;
     friend class lock_request_unit_test;
 };
 ENSURE_POD(lock_request);

@@ -137,7 +137,7 @@ void lock_request::build_wait_graph(wfg *wait_graph, const txnid_set &conflicts)
     size_t num_conflicts = conflicts.size();
     for (size_t i = 0; i < num_conflicts; i++) {
         TXNID conflicting_txnid = conflicts.get(i);
-        lock_request *conflicting_request = find_lock_request(conflicting_txnid);
+        lock_request *conflicting_request = m_info->find_lock_request(conflicting_txnid);
         invariant(conflicting_txnid != m_txnid);
         invariant(conflicting_request != this);
         if (conflicting_request) {
@@ -192,9 +192,9 @@ int lock_request::start(void) {
         if (m_start_before_pending_test_callback)
             m_start_before_pending_test_callback();
         toku_mutex_lock(&m_info->mutex);
-        insert_into_lock_requests();
+        m_info->add_to_pending(this);
         if (deadlock_exists(conflicts)) {
-            remove_from_lock_requests();
+            m_info->remove_from_pending(this);
             r = DB_LOCK_DEADLOCK;
         }
         toku_mutex_unlock(&m_info->mutex);
@@ -230,7 +230,7 @@ int lock_request::wait(uint64_t wait_time_ms, uint64_t killed_time_ms, int (*kil
     while (m_state == state::PENDING) {
         // check if this thread is killed
         if (killed_callback && killed_callback()) {
-            remove_from_lock_requests();
+            m_info->remove_from_pending(this);
             complete(DB_LOCK_NOTGRANTED);
             continue;
         }
@@ -256,7 +256,7 @@ int lock_request::wait(uint64_t wait_time_ms, uint64_t killed_time_ms, int (*kil
 
             // if we're still pending and we timed out, then remove our
             // request from the set of lock requests and fail.
-            remove_from_lock_requests();
+            m_info->remove_from_pending(this);
 
             // complete sets m_state to COMPLETE, breaking us out of the loop
             complete(DB_LOCK_NOTGRANTED);
@@ -321,7 +321,7 @@ int lock_request::retry(void) {
     // then remove ourselves from the set of lock requests, complete
     // the lock request, and signal the waiting threads.
     if (r == 0 || r == TOKUDB_OUT_OF_LOCKS) {
-        remove_from_lock_requests();
+        m_info->remove_from_pending(this);
         complete(r);
         if (m_retry_test_callback)
             m_retry_test_callback();  // test callback
@@ -340,7 +340,7 @@ int lock_request::retry(void) {
 void lock_request::retry_all_lock_requests(
     locktree *lt,
     void (*after_retry_all_test_callback)(void)) {
-    lt_lock_request_info *info = lt->get_lock_request_info();
+    lock_request_info *info = lt->get_lock_request_info();
 
     // if there are no pending lock requests than there is nothing to do
     // the unlocked data race on pending_is_empty is OK since lock requests
@@ -379,7 +379,7 @@ void lock_request::retry_all_lock_requests(
     toku_mutex_unlock(&info->retry_mutex);
 }
 
-void lock_request::retry_all_lock_requests_info(lt_lock_request_info *info) {
+void lock_request::retry_all_lock_requests_info(lock_request_info *info) {
     toku_mutex_lock(&info->mutex);
     // retry all of the pending lock requests.
     for (size_t i = 0; i < info->pending_lock_requests.size();) {
@@ -408,72 +408,11 @@ void *lock_request::get_extra(void) const {
 }
 
 void lock_request::kill_waiter(void) {
-    remove_from_lock_requests();
+    m_info->remove_from_pending(this);
     complete(DB_LOCK_NOTGRANTED);
     toku_cond_broadcast(&m_wait_cond);
 }
 
-void lock_request::kill_waiter(locktree *lt, void *extra) {
-    lt_lock_request_info *info = lt->get_lock_request_info();
-    toku_mutex_lock(&info->mutex);
-    for (size_t i = 0; i < info->pending_lock_requests.size(); i++) {
-        lock_request *request;
-        int r = info->pending_lock_requests.fetch(i, &request);
-        if (r == 0 && request->get_extra() == extra) {
-            request->kill_waiter();
-            break;
-        }
-    }
-    toku_mutex_unlock(&info->mutex);
-}
-
-// find another lock request by txnid. must hold the mutex.
-lock_request *lock_request::find_lock_request(const TXNID &txnid) {
-    lock_request *request;
-    int r = m_info->pending_lock_requests.find_zero<TXNID, find_by_txnid>(txnid, &request, nullptr);
-    if (r != 0) {
-        request = nullptr;
-    }
-    return request;
-}
-
-// insert this lock request into the locktree's set. must hold the mutex.
-void lock_request::insert_into_lock_requests(void) {
-    uint32_t idx;
-    lock_request *request;
-    int r = m_info->pending_lock_requests.find_zero<TXNID, find_by_txnid>(
-        m_txnid, &request, &idx);
-    invariant(r == DB_NOTFOUND);
-    r = m_info->pending_lock_requests.insert_at(this, idx);
-    invariant_zero(r);
-    m_info->pending_is_empty = false;
-}
-
-// remove this lock request from the locktree's set. must hold the mutex.
-void lock_request::remove_from_lock_requests(void) {
-    uint32_t idx;
-    lock_request *request;
-    int r = m_info->pending_lock_requests.find_zero<TXNID, find_by_txnid>(
-        m_txnid, &request, &idx);
-    invariant_zero(r);
-    invariant(request == this);
-    r = m_info->pending_lock_requests.delete_at(idx);
-    invariant_zero(r);
-    if (m_info->pending_lock_requests.size() == 0)
-        m_info->pending_is_empty = true;
-}
-
-int lock_request::find_by_txnid(lock_request *const &request,
-                                const TXNID &txnid) {
-    TXNID request_txnid = request->m_txnid;
-    if (request_txnid < txnid) {
-        return -1;
-    } else if (request_txnid == txnid) {
-        return 0;
-    } else {
-        return 1;
-    }
-}
 
 void lock_request::set_start_test_callback(void (*f)(void)) {
     m_start_test_callback = f;
@@ -485,6 +424,127 @@ void lock_request::set_start_before_pending_test_callback(void (*f)(void)) {
 
 void lock_request::set_retry_test_callback(void (*f)(void)) {
     m_retry_test_callback = f;
+}
+
+void lock_request_info::init(void) {
+    pending_lock_requests.create();
+    pending_is_empty = true;
+    ZERO_STRUCT(mutex);
+    toku_mutex_init(*locktree_request_info_mutex_key, &mutex, nullptr);
+    retry_want = retry_done = 0;
+    ZERO_STRUCT(counters);
+    ZERO_STRUCT(retry_mutex);
+    toku_mutex_init(
+        *locktree_request_info_retry_mutex_key, &retry_mutex, nullptr);
+    toku_cond_init(*locktree_request_info_retry_cv_key, &retry_cv, nullptr);
+    running_retry = false;
+
+    TOKU_VALGRIND_HG_DISABLE_CHECKING(&pending_is_empty,
+                                      sizeof(pending_is_empty));
+    TOKU_DRD_IGNORE_VAR(pending_is_empty);
+}
+
+void lock_request_info::destroy(void) {
+    invariant(pending_lock_requests.size() == 0);
+    pending_lock_requests.destroy();
+    toku_mutex_destroy(&mutex);
+    toku_mutex_destroy(&retry_mutex);
+    toku_cond_destroy(&retry_cv);
+}
+
+int lock_request_info::iterate_pending_lock_requests(lock_request_iterate_callback callback,
+                                                     void *extra) {
+    int r = 0;
+    toku_mutex_lock(&mutex);
+    size_t num_requests = pending_lock_requests.size();
+    for (size_t i = 0; i < num_requests && r == 0; i++) {
+        lock_request *req;
+        r = pending_lock_requests.fetch(i, &req);
+        invariant_zero(r);
+        r = callback(req->m_lt->get_dict_id(), req->get_txnid(),
+                     req->get_left_key(), req->get_right_key(),
+                     req->get_conflicting_txnid(), req->get_start_time(), extra);
+    }
+
+    toku_mutex_unlock(&mutex);
+    return r;
+}
+
+// Find a lock request in the set of pending lock request that matches
+// 'extra' and kill it.  Since this operation is expected to be rarely
+// executed, use a linear search algorithm of the entire set.
+void lock_request_info::kill_waiter(void *extra) {
+    toku_mutex_lock(&mutex);
+    for (size_t i = 0; i < pending_lock_requests.size(); i++) {
+        lock_request *request;
+        int r = pending_lock_requests.fetch(i, &request);
+        if (r == 0 && request->get_extra() == extra) {
+            request->kill_waiter();
+            break;
+        }
+    }
+    toku_mutex_unlock(&mutex);
+}
+
+const lt_counters& lock_request_info::get_counters(void) const {
+    return counters;
+}
+
+void lock_request_info::add_status(uint64_t *cumulative_lock_requests_pending, lt_counters *cumulative_counters) {
+    if (toku_mutex_trylock(&mutex) == 0) {
+        if (cumulative_lock_requests_pending)
+            *cumulative_lock_requests_pending += pending_lock_requests.size();
+        if (cumulative_counters)
+            cumulative_counters->add(counters);
+        toku_mutex_unlock(&mutex);
+    }
+}
+
+// find another lock request by txnid.
+lock_request *lock_request_info::find_lock_request(const TXNID &txnid) {
+    lock_request *request;
+    int r = pending_lock_requests.find_zero<TXNID, find_by_txnid>(txnid, &request, nullptr);
+    if (r != 0) {
+        request = nullptr;
+    }
+    return request;
+}
+
+// Add a lock request into the set of pending lock requests.
+void lock_request_info::add_to_pending(lock_request *request) {
+    uint32_t idx;
+    int r = pending_lock_requests.find_zero<TXNID, find_by_txnid>(
+            request->get_txnid(), &request, &idx);
+    invariant(r == DB_NOTFOUND);
+    r = pending_lock_requests.insert_at(request, idx);
+    invariant_zero(r);
+    pending_is_empty = false;
+}
+
+// Remove a lock request from the set of pending lock requests.
+void lock_request_info::remove_from_pending(lock_request *request) {
+    uint32_t idx;
+    lock_request *found_lock_request;
+    int r = pending_lock_requests.find_zero<TXNID, find_by_txnid>(
+            request->get_txnid(), &found_lock_request, &idx);
+    invariant_zero(r);
+    invariant(request == found_lock_request);
+    r = pending_lock_requests.delete_at(idx);
+    invariant_zero(r);
+    if (pending_lock_requests.size() == 0)
+        pending_is_empty = true;
+}
+
+int lock_request_info::find_by_txnid(lock_request *const &request,
+                                const TXNID &txnid) {
+    TXNID request_txnid = request->get_txnid();
+    if (request_txnid < txnid) {
+        return -1;
+    } else if (request_txnid == txnid) {
+        return 0;
+    } else {
+        return 1;
+    }
 }
 
 } /* namespace toku */

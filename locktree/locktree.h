@@ -93,8 +93,44 @@ namespace toku {
         }
     };
 
+    typedef int (*lock_request_iterate_callback)(DICTIONARY_ID dict_id,
+                                                 TXNID txnid,
+                                                 const DBT *left_key,
+                                                 const DBT *right_key,
+                                                 TXNID blocking_txnid,
+                                                 uint64_t start_time,
+                                                 void *extra);
+
     // Lock request state for some locktree
-    struct lt_lock_request_info {
+    class lock_request_info {
+    public:
+        void init(void);
+
+        void destroy(void);
+
+        // Find a lock request in the set of pending lock request by txnid.
+        // Requires: the lock_request_info mutex is held
+        lock_request *find_lock_request(const TXNID &txnid);
+
+        // Add a lock request to the set of pending lock requests.
+        // Requires: the lock_request_info mutex is held
+        void add_to_pending(lock_request *);
+
+        // Remove a lock request from the set of pending lock requests.
+        // Requires: The lock_request_info mutex is held
+        void remove_from_pending(lock_request *);
+
+        // Find a pending lock request that matches extra and kill it.
+        void kill_waiter(void *extra);
+
+        // For each pending lock request, invoke the callback function.
+        int iterate_pending_lock_requests(lock_request_iterate_callback cb, void *extra);
+
+        // Accumulate status counters.
+        const lt_counters &get_counters(void) const;
+        void add_status(uint64_t *cumulative_lock_requests_pending, lt_counters *cumulative_counters);
+
+    private:
         omt<lock_request *> pending_lock_requests;
         std::atomic_bool pending_is_empty;
         toku_mutex_t mutex;
@@ -106,8 +142,11 @@ namespace toku {
         toku_cond_t retry_cv;
         bool running_retry;
 
-        void init(void);
-        void destroy(void);
+        static int find_by_txnid(lock_request *const &request, const TXNID &txnid);
+
+        friend class lock_request;
+        friend class lock_request_unit_test;
+        friend class locktree_unit_test;
     };
 
     // The locktree manager manages a set of locktrees, one for each open
@@ -147,13 +186,6 @@ namespace toku {
 
         // effect: calls the iterate function on each pending lock request
         // note: holds the manager's mutex
-        typedef int (*lock_request_iterate_callback)(DICTIONARY_ID dict_id,
-                                                     TXNID txnid,
-                                                     const DBT *left_key,
-                                                     const DBT *right_key,
-                                                     TXNID blocking_txnid,
-                                                     uint64_t start_time,
-                                                     void *extra);
         int iterate_pending_lock_requests(lock_request_iterate_callback cb, void *extra);
 
         // effect: Determines if too many locks or too much memory is being used,
@@ -327,7 +359,7 @@ namespace toku {
         // something less opaque than usual to strike a tradeoff between
         // abstraction and code complexity. It is still fairly abstract
         // since the lock_request object is opaque 
-        struct lt_lock_request_info *get_lock_request_info(void);
+        lock_request_info *get_lock_request_info(void);
 
     private:
         locktree_manager *m_mgr;
@@ -346,7 +378,7 @@ namespace toku {
         concurrent_tree *m_rangetree;
 
         void *m_userdata;
-        struct lt_lock_request_info m_lock_request_info;
+        lock_request_info m_lock_request_info;
 
         // The following fields and members prefixed with "sto_" are for
         // the single txnid optimization, intended to speed up the case
@@ -489,12 +521,6 @@ namespace toku {
         // Returns:
         //  true if m_sto_txnid is not TXNID_NONE
         bool sto_txnid_is_valid_unsafe(void) const;
-
-        // Effect:
-        //  Provides a hook for a helgrind suppression.
-        // Returns:
-        //  m_sto_score
-        int sto_get_score_unsafe(void )const;
 
         void remove_overlapping_locks_for_txnid(TXNID txnid,
                                                 const DBT *left_key, const DBT *right_key);
