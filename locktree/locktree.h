@@ -125,6 +125,8 @@ namespace toku {
 
         // Find a pending lock request that matches extra and kill it.
         void kill_waiter(void *extra);
+        void kill_waiter_fetch(void *extra);
+        void kill_waiter_iterate(void *extra);
 
         // For each pending lock request, invoke the callback function.
         int iterate_pending_lock_requests(lock_request_iterate_callback cb, void *extra);

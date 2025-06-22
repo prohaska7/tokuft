@@ -424,10 +424,15 @@ int lock_request_info::iterate_pending_lock_requests(lock_request_iterate_callba
 }
 
 // Find a lock request in the set of pending lock request that matches
-// 'extra' and kill it. 
-// Performance note: use an omt iterator since it has less complexity O(log N)
-// compared to this implementation O(N * log N)
+// 'extra' and kill it. The OMT iterator gives the best performance. If
+// an unordered_map from 'extra' to 'lock_request *' were added, then
+// the performance could be O(1) at the cost of more code.
 void lock_request_info::kill_waiter(void *extra) {
+    kill_waiter_iterate(extra);
+}
+
+// Performance: O(N log N) since OMT fetch is O(log N)
+void lock_request_info::kill_waiter_fetch(void *extra) {
     toku_mutex_lock(&mutex);
     for (size_t i = 0; i < pending_lock_requests.size(); i++) {
         lock_request *request;
@@ -436,6 +441,34 @@ void lock_request_info::kill_waiter(void *extra) {
             request->kill_waiter();
             break;
         }
+    }
+    toku_mutex_unlock(&mutex);
+}
+
+// kill_waiter iterator data
+struct kill_waiter_match_d {
+    void *target_extra;
+    uint32_t found_idx;
+    lock_request *found_request;
+};
+
+// kill_waiter iterator callback function
+static int kill_waiter_match_f(lock_request * const &request, const uint32_t idx, kill_waiter_match_d *const match) {
+    if (request->get_extra() == match->target_extra) {
+        match->found_idx = idx;
+        match->found_request = request;
+        return 1;
+    } else
+        return 0;
+}
+
+// Performance: O(N + log N) since the OMT iterate is O(N + log N)
+void lock_request_info::kill_waiter_iterate(void *extra) {
+    toku_mutex_lock(&mutex);
+    kill_waiter_match_d match = { extra };
+    int r = pending_lock_requests.iterate<kill_waiter_match_d, kill_waiter_match_f>(&match);
+    if (r) {
+        match.found_request->kill_waiter();
     }
     toku_mutex_unlock(&mutex);
 }
