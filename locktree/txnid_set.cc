@@ -113,4 +113,8 @@ TXNID txnid_set::get(size_t i) const {
     return txnid;
 }
 
+void txnid_set::clear(void) {
+    m_txnids.clear();
+}
+
 } /* namespace toku */

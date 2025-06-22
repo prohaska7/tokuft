@@ -62,7 +62,7 @@ namespace toku {
 // initialize a lock request's internals
 void lock_request::create(void) {
     m_txnid = TXNID_NONE;
-    m_conflicting_txnid = TXNID_NONE;
+    m_conflicts.create();
     m_start_time = 0;
     m_left_key = nullptr;
     m_right_key = nullptr;
@@ -81,6 +81,7 @@ void lock_request::create(void) {
     m_start_test_callback = nullptr;
     m_start_before_pending_test_callback = nullptr;
     m_retry_test_callback = nullptr;
+    m_wfg_visited = false;
 }
 
 // destroy a lock request.
@@ -88,6 +89,7 @@ void lock_request::destroy(void) {
     invariant(m_state != state::PENDING);
     invariant(m_state != state::DESTROYED);
     m_state = state::DESTROYED;
+    m_conflicts.destroy();
     toku_destroy_dbt(&m_left_key_copy);
     toku_destroy_dbt(&m_right_key_copy);
     toku_cond_destroy(&m_wait_cond);
@@ -122,64 +124,16 @@ void lock_request::copy_keys() {
     }
 }
 
-// what are the conflicts for this pending lock request?
-void lock_request::get_conflicts(txnid_set *conflicts) {
-    invariant(m_state == state::PENDING);
-    const bool is_write_request = m_type == type::WRITE;
-    m_lt->get_conflicts(is_write_request, m_txnid, m_left_key, m_right_key, conflicts);
-}
-
-// build a wait-for-graph for this lock request and the given conflict set
-// for each transaction B that blocks A's lock request
-//     if B is blocked then
-//         add (A,T) to the WFG and if B is new, fill in the WFG from B
-void lock_request::build_wait_graph(wfg *wait_graph, const txnid_set &conflicts) {
-    size_t num_conflicts = conflicts.size();
-    for (size_t i = 0; i < num_conflicts; i++) {
-        TXNID conflicting_txnid = conflicts.get(i);
-        lock_request *conflicting_request = m_info->find_lock_request(conflicting_txnid);
-        invariant(conflicting_txnid != m_txnid);
-        invariant(conflicting_request != this);
-        if (conflicting_request) {
-            bool already_exists = wait_graph->node_exists(conflicting_txnid);
-            wait_graph->add_edge(m_txnid, conflicting_txnid);
-            if (!already_exists) {
-                // recursively build the wait for graph rooted at the conflicting
-                // request, given its set of lock conflicts.
-                txnid_set other_conflicts;
-                other_conflicts.create();
-                conflicting_request->get_conflicts(&other_conflicts);
-                conflicting_request->build_wait_graph(wait_graph, other_conflicts);
-                other_conflicts.destroy();
-            }
-        }
-    }
-}
-
-// returns: true if the current set of lock requests contains
-//          a deadlock, false otherwise.
-bool lock_request::deadlock_exists(const txnid_set &conflicts) {
-    wfg wait_graph;
-    wait_graph.create();
-
-    build_wait_graph(&wait_graph, conflicts);
-    bool deadlock = wait_graph.cycle_exists_from_txnid(m_txnid);
-
-    wait_graph.destroy();
-    return deadlock;
-}
-
 // try to acquire a lock described by this lock request. 
 int lock_request::start(void) {
     int r;
 
-    txnid_set conflicts;
-    conflicts.create();
+    m_conflicts.clear();
     if (m_type == type::WRITE) {
-        r = m_lt->acquire_write_lock(m_txnid, m_left_key, m_right_key, &conflicts, m_big_txn);
+        r = m_lt->acquire_write_lock(m_txnid, m_left_key, m_right_key, &m_conflicts, m_big_txn);
     } else {
         invariant(m_type == type::READ);
-        r = m_lt->acquire_read_lock(m_txnid, m_left_key, m_right_key, &conflicts, m_big_txn);
+        r = m_lt->acquire_read_lock(m_txnid, m_left_key, m_right_key, &m_conflicts, m_big_txn);
     }
 
     // if the lock is not granted, save it to the set of lock requests
@@ -188,12 +142,11 @@ int lock_request::start(void) {
         copy_keys();
         m_state = state::PENDING;
         m_start_time = toku_current_time_microsec() / 1000;
-        m_conflicting_txnid = conflicts.get(0);
         if (m_start_before_pending_test_callback)
             m_start_before_pending_test_callback();
         toku_mutex_lock(&m_info->mutex);
         m_info->add_to_pending(this);
-        if (deadlock_exists(conflicts)) {
+        if (m_info->deadlock_exists(this)) {
             m_info->remove_from_pending(this);
             r = DB_LOCK_DEADLOCK;
         }
@@ -206,7 +159,6 @@ int lock_request::start(void) {
         complete(r);
     }
 
-    conflicts.destroy();
     return r;
 }
 
@@ -300,21 +252,21 @@ uint64_t lock_request::get_start_time(void) const {
 }
 
 TXNID lock_request::get_conflicting_txnid(void) const {
-    return m_conflicting_txnid;
+    assert(m_conflicts.size() > 0);
+    return m_conflicts.get(0);
 }
 
 int lock_request::retry(void) {
     invariant(m_state == state::PENDING);
     int r;
-    txnid_set conflicts;
-    conflicts.create();
 
+    m_conflicts.clear();
     if (m_type == type::WRITE) {
         r = m_lt->acquire_write_lock(
-            m_txnid, m_left_key, m_right_key, &conflicts, m_big_txn);
+            m_txnid, m_left_key, m_right_key, &m_conflicts, m_big_txn);
     } else {
         r = m_lt->acquire_read_lock(
-            m_txnid, m_left_key, m_right_key, &conflicts, m_big_txn);
+            m_txnid, m_left_key, m_right_key, &m_conflicts, m_big_txn);
     }
 
     // if the acquisition succeeded or if out of locks
@@ -327,12 +279,10 @@ int lock_request::retry(void) {
             m_retry_test_callback();  // test callback
         toku_cond_broadcast(&m_wait_cond);
     } else if (r == DB_LOCK_NOTGRANTED) {
-        // get the conflicting txnid and remain pending
-        m_conflicting_txnid = conflicts.get(0);
+        ; // remain pending and do nothing
     } else {
         invariant(0);
     }
-    conflicts.destroy();
 
     return r;
 }
@@ -413,7 +363,6 @@ void lock_request::kill_waiter(void) {
     toku_cond_broadcast(&m_wait_cond);
 }
 
-
 void lock_request::set_start_test_callback(void (*f)(void)) {
     m_start_test_callback = f;
 }
@@ -452,6 +401,10 @@ void lock_request_info::destroy(void) {
     toku_cond_destroy(&retry_cv);
 }
 
+// Invoke callback function on all lock requests in the pending lock request set.
+// If the callback function returns non-zero, then the iteration is complete.
+// Performance note: use an omt iterator since it has less complexity O(log N)
+// compared to this implementation O(N * log N)
 int lock_request_info::iterate_pending_lock_requests(lock_request_iterate_callback callback,
                                                      void *extra) {
     int r = 0;
@@ -471,8 +424,9 @@ int lock_request_info::iterate_pending_lock_requests(lock_request_iterate_callba
 }
 
 // Find a lock request in the set of pending lock request that matches
-// 'extra' and kill it.  Since this operation is expected to be rarely
-// executed, use a linear search algorithm of the entire set.
+// 'extra' and kill it. 
+// Performance note: use an omt iterator since it has less complexity O(log N)
+// compared to this implementation O(N * log N)
 void lock_request_info::kill_waiter(void *extra) {
     toku_mutex_lock(&mutex);
     for (size_t i = 0; i < pending_lock_requests.size(); i++) {
@@ -498,16 +452,6 @@ void lock_request_info::add_status(uint64_t *cumulative_lock_requests_pending, l
             cumulative_counters->add(counters);
         toku_mutex_unlock(&mutex);
     }
-}
-
-// find another lock request by txnid.
-lock_request *lock_request_info::find_lock_request(const TXNID &txnid) {
-    lock_request *request;
-    int r = pending_lock_requests.find_zero<TXNID, find_by_txnid>(txnid, &request, nullptr);
-    if (r != 0) {
-        request = nullptr;
-    }
-    return request;
 }
 
 // Add a lock request into the set of pending lock requests.
@@ -545,6 +489,56 @@ int lock_request_info::find_by_txnid(lock_request *const &request,
     } else {
         return 1;
     }
+}
+
+// Determine if a deadlock exists in the wait for graph contained in
+// the set of pending lock requests.  If a cycle exists in the graph,
+// then a deadlock exists.  This algorithm does a search rooted in
+// a given lock request called lr.
+// Return true if there is a deadlock in the wait for graph involving
+// the given lock request.  Otherwise returns false.
+// Requires lock_request_info mutex locked.
+bool lock_request_info::deadlock_exists(lock_request *lr) {
+    bool found_deadlock = false;
+    for (size_t i = 0; i < lr->m_conflicts.size(); i++) {
+        TXNID conflicting_txnid = lr->m_conflicts.get(i);
+        found_deadlock = cycle_exists(conflicting_txnid, lr->m_txnid);
+        if (found_deadlock)
+            break;
+    }
+    return found_deadlock;
+}
+
+// Determine if a cycle exists in the wait for graph from 'from' to
+// 'target'. Find the lock request for txnid 'from'.  If there is none,
+// then there is no cycle.  If it was already visited, then there
+// is a cycle in the graph.  If the lock request has the target
+// txnid as one of its conflicts, then a cycle exist.  Otherwise,
+// recursively see if a cycle exists from each conflict to the target.
+// Return true if there is a cycle.  Otherwise returns false.
+bool lock_request_info::cycle_exists(TXNID from, TXNID target) {
+    bool found_cycle;
+    lock_request *lr;
+    int r = pending_lock_requests.find_zero<TXNID, find_by_txnid>(from, &lr, nullptr);
+    if (r != 0) {
+        found_cycle = false;
+    } else if (lr->m_wfg_visited) {
+        found_cycle = true;
+    } else {
+        if (lr->m_conflicts.contains(target)) {
+            found_cycle = true;
+        } else {
+            lr->m_wfg_visited = true;
+            for (size_t i = 0; i < lr->m_conflicts.size(); i++) {
+                TXNID conflicting_txnid = lr->m_conflicts.get(i);
+                found_cycle = cycle_exists(conflicting_txnid, target);
+                if (found_cycle)
+                    break;
+            }
+            lr->m_wfg_visited = false;
+        }
+    }
+    return found_cycle;
 }
 
 } /* namespace toku */

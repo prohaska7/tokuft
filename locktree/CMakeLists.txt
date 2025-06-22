@@ -7,7 +7,6 @@ set(locktree_srcs
     txnid_set.cc
     range_buffer.cc
     keyrange.cc
-    wfg.cc
     )
 
 ## make the shared library for tests

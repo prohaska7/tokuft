@@ -400,32 +400,6 @@ int locktree::acquire_write_lock(TXNID txnid, const DBT *left_key, const DBT *ri
     return try_acquire_lock(true, txnid, left_key, right_key, conflicts, big_txn);
 }
 
-void locktree::get_conflicts(bool is_write_request,
-                             TXNID txnid, const DBT *left_key, const DBT *right_key,
-                             txnid_set *conflicts) {
-    // because we only support write locks, ignore this bit for now.
-    (void) is_write_request;
-
-    // preparing and acquire a locked keyrange over the range
-    keyrange range;
-    range.create(left_key, right_key);
-    concurrent_tree::locked_keyrange lkr;
-    lkr.prepare(m_rangetree);
-    lkr.acquire(range);
-
-    // copy out the set of overlapping row locks and determine the conflicts
-    GrowableArray<row_lock> overlapping_row_locks;
-    overlapping_row_locks.init();
-    iterate_and_get_overlapping_row_locks(&lkr, &overlapping_row_locks);
-
-    // we don't care if conflicts exist. we just want the conflicts set populated.
-    (void) determine_conflicting_txnids(overlapping_row_locks, txnid, conflicts);
-
-    lkr.release();
-    overlapping_row_locks.deinit();
-    range.destroy();
-}
-
 // Effect:
 //  For each range in the lock tree that overlaps the given range and has
 //  the given txnid, remove it.

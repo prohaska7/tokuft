@@ -64,7 +64,6 @@ Copyright (c) 2006, 2015, Percona and/or its affiliates. All rights reserved.
 #include <util/omt.h>
 
 #include "txnid_set.h"
-#include "wfg.h"
 #include "range_buffer.h"
 
 
@@ -108,10 +107,6 @@ namespace toku {
 
         void destroy(void);
 
-        // Find a lock request in the set of pending lock request by txnid.
-        // Requires: the lock_request_info mutex is held
-        lock_request *find_lock_request(const TXNID &txnid);
-
         // Add a lock request to the set of pending lock requests.
         // Requires: the lock_request_info mutex is held
         void add_to_pending(lock_request *);
@@ -119,6 +114,14 @@ namespace toku {
         // Remove a lock request from the set of pending lock requests.
         // Requires: The lock_request_info mutex is held
         void remove_from_pending(lock_request *);
+
+        // Determine if a deadlock exists with the pending lock requests. The last
+        // lock request added to the set of pending lock requests is assumed to be
+        // start_point.  The set of pending lock requests includes a wait for graph (WFG)
+        // since every lock request includes the set of txn's that it conflicts with.
+        // If a cycle exists in the WFG, then a deadlock has been detected.
+        // Returns true if a deadlock exists.  Otherwise returns false.
+        bool deadlock_exists(lock_request *start_point);
 
         // Find a pending lock request that matches extra and kill it.
         void kill_waiter(void *extra);
@@ -142,6 +145,12 @@ namespace toku {
         toku_cond_t retry_cv;
         bool running_retry;
 
+        // Determine if a cycle exists in the pending lock requests originating from
+        // from and terminating in target.
+        // Return true if a cycle exists from from to target.  Otherwise returns false.
+        bool cycle_exists(TXNID from, TXNID target);
+
+        // Lookup by txnid function for the set of pending lock requests.
         static int find_by_txnid(lock_request *const &request, const TXNID &txnid);
 
         friend class lock_request;
@@ -329,11 +338,6 @@ namespace toku {
         //          given conflicts set with the txnids that hold conflicting locks in the range.
         //          If the locktree cannot create more locks, return TOKUDB_OUT_OF_LOCKS.
         int acquire_write_lock(TXNID txnid, const DBT *left_key, const DBT *right_key, txnid_set *conflicts, bool big_txn);
-
-        // effect: populate the conflicts set with the txnids that would preventing
-        //         the given txnid from getting a lock on [left_key, right_key]
-        void get_conflicts(bool is_write_request, TXNID txnid,
-                const DBT *left_key, const DBT *right_key, txnid_set *conflicts);
 
         // effect: Release all of the lock ranges represented by the range buffer for a txnid.
         void release_locks(TXNID txnid, const range_buffer *ranges);

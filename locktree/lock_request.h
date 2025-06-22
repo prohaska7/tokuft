@@ -58,7 +58,6 @@ Copyright (c) 2006, 2015, Percona and/or its affiliates. All rights reserved.
 
 #include "locktree/locktree.h"
 #include "locktree/txnid_set.h"
-#include "locktree/wfg.h"
 #include "ft/comparator.h"
 
 namespace toku {
@@ -152,7 +151,7 @@ public:
     // copies these keys and stores them in m_left_key_copy etc and
     // sets the temporary pointers to null.
     TXNID m_txnid;
-    TXNID m_conflicting_txnid;
+    txnid_set m_conflicts;
     uint64_t m_start_time;
     const DBT *m_left_key;
     const DBT *m_right_key;
@@ -171,6 +170,7 @@ public:
     toku_cond_t m_wait_cond;
 
     bool m_big_txn;
+    bool m_wfg_visited;
 
     // the lock request info state stored in the
     // locktree that this lock request is for.
@@ -183,18 +183,6 @@ public:
     int retry(void);
 
     void complete(int complete_r);
-
-    // effect: Asks this request's locktree which txnids are preventing
-    //         us from getting the lock described by this request.
-    // returns: conflicts is populated with the txnid's that this request
-    //          is blocked on
-    void get_conflicts(txnid_set *conflicts);
-
-    // effect: Builds a wait-for-graph for this lock request and the given conflict set
-    void build_wait_graph(wfg *wait_graph, const txnid_set &conflicts);
-
-    // returns: True if this lock request is in deadlock with the given conflicts set
-    bool deadlock_exists(const txnid_set &conflicts);
 
     void copy_keys(void);
 

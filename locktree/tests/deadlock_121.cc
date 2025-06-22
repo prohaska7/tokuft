@@ -32,64 +32,53 @@ Copyright (c) 2006, 2015, Percona and/or its affiliates. All rights reserved.
 
     You should have received a copy of the GNU Affero General Public License
     along with PerconaFT.  If not, see <http://www.gnu.org/licenses/>.
-
-----------------------------------------
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
 ======= */
 
 #ident "Copyright (c) 2006, 2015, Percona and/or its affiliates. All rights reserved."
 
-#pragma once
-
-#include "ft/txn/txn.h"
-
-#include "util/omt.h"
+#include "lock_request_unit_test.h"
 
 namespace toku {
 
-class txnid_set {
-public:
-    // effect: Creates an empty set. Does not malloc space for
-    //         any entries yet. That is done lazily on add().
-    void create(void);
+// Verify that the deadlock detector works on a graph with the following
+// wait for edges:
+// 1 waits for 2, 2 waits for 1
+void lock_request_unit_test::run(void) {
+    lock_request_info mgr;
+    mgr.init();
 
-    // effect: Destroy the set's internals.
-    void destroy(void);
+    const int N = 2;
+    lock_request lock_request[N];
+    for (int i=0; i<N; i++)
+        lock_request[i].create();
 
-    // returns: True if the given txnid is a member of the set.
-    bool contains(TXNID id) const;
+    // Add 1 -> 2
+    lock_request[0].m_txnid = 1;
+    lock_request[0].m_conflicts.add(2);
+    mgr.add_to_pending(&lock_request[0]);
+    assert(!mgr.deadlock_exists(&lock_request[0]));
 
-    // effect: Adds a given txnid to the set if it did not exist
-    void add(TXNID txnid);
+    // Add 2 -> 1
+    lock_request[1].m_txnid = 2;
+    lock_request[1].m_conflicts.add(1);
+    mgr.add_to_pending(&lock_request[1]);
+    assert(mgr.deadlock_exists(&lock_request[0]));
+    assert(mgr.deadlock_exists(&lock_request[1]));
 
-    // effect: Deletes a txnid from the set if it exists.
-    void remove(TXNID txnid);
+    for (int i=0; i<N; i++)
+        mgr.remove_from_pending(&lock_request[i]);
 
-    // returns: Size of the set
-    size_t size(void) const;
+    for (int i=0; i<N; i++)
+        lock_request[i].destroy();
 
-    // returns: The "i'th" id in the set, as if it were sorted.
-    TXNID get(size_t i) const;
-
-    // effect: Makes the set empty.
-    void clear(void);
-
-private:
-    toku::omt<TXNID> m_txnids;
-
-    friend class txnid_set_unit_test;
-};
-ENSURE_POD(txnid_set);
+    mgr.destroy();
+}
 
 } /* namespace toku */
+
+int main(void) {
+    toku::lock_request_unit_test test;
+    test.run();
+    return 0;
+}
+
