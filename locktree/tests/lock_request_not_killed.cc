@@ -60,16 +60,19 @@ static int my_killed_callback(void) {
 // make sure deadlocks are detected when a lock request starts
 void lock_request_unit_test::run(void) {
     int r;
+
+    locktree_manager mgr;
+    mgr.create(nullptr, nullptr, nullptr, nullptr);
+
     locktree lt;
+    const DICTIONARY_ID dict_id = { 1 };
+    lt.create(&mgr, dict_id, dbt_comparator);
 
-    DICTIONARY_ID dict_id = { 1 };
-    lt.create(nullptr, dict_id, dbt_comparator);
-
-    TXNID txnid_a = 1001;
+    const TXNID txnid_a = 1001;
     lock_request request_a;
     request_a.create();
 
-    TXNID txnid_b = 2001;
+    const TXNID txnid_b = 2001;
     lock_request request_b;
     request_b.create();
 
@@ -106,6 +109,7 @@ void lock_request_unit_test::run(void) {
 
     lt.release_reference();
     lt.destroy();
+    mgr.destroy();
 }
 
 } /* namespace toku */

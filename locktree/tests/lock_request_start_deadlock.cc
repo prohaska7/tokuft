@@ -43,17 +43,20 @@ namespace toku {
 // make sure deadlocks are detected when a lock request starts
 void lock_request_unit_test::run(void) {
     int r;
-    locktree lt;
 
     // something short
     const uint64_t lock_wait_time = 10;
 
-    DICTIONARY_ID dict_id = { 1 };
-    lt.create(nullptr, dict_id, dbt_comparator);
+    locktree_manager mgr;
+    mgr.create(nullptr, nullptr, nullptr, nullptr);
 
-    TXNID txnid_a = 1001;
-    TXNID txnid_b = 2001;
-    TXNID txnid_c = 3001;
+    locktree lt;
+    const DICTIONARY_ID dict_id = { 1 };
+    lt.create(&mgr, dict_id, dbt_comparator);
+
+    const TXNID txnid_a = 1001;
+    const TXNID txnid_b = 2001;
+    const TXNID txnid_c = 3001;
     lock_request request_a;
     lock_request request_b;
     lock_request request_c;
@@ -108,6 +111,7 @@ void lock_request_unit_test::run(void) {
 
     lt.release_reference();
     lt.destroy();
+    mgr.destroy();
 }
 
 } /* namespace toku */

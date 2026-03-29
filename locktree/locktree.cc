@@ -92,8 +92,6 @@ void locktree::create(locktree_manager *mgr, DICTIONARY_ID dict_id, const compar
     m_sto_score = STO_SCORE_THRESHOLD;
     m_sto_end_early_count = 0;
     m_sto_end_early_time = 0;
-
-    m_lock_request_info.init();
 }
 
 void locktree::destroy(void) {
@@ -102,7 +100,6 @@ void locktree::destroy(void) {
     m_rangetree->destroy();
     toku_free(m_rangetree);
     m_sto_buffer.destroy();
-    m_lock_request_info.destroy();
 }
 
 void locktree::add_reference(void) {
@@ -700,10 +697,6 @@ void *locktree::get_userdata(void) const {
 
 void locktree::set_userdata(void *userdata) {
     m_userdata = userdata;
-}
-
-lock_request_info *locktree::get_lock_request_info(void) {
-    return &m_lock_request_info;
 }
 
 void locktree::set_comparator(const comparator &cmp) {

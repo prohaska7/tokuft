@@ -78,18 +78,10 @@ namespace toku {
     typedef void (*lt_destroy_cb)(locktree *lt);
     typedef void (*lt_escalate_cb)(TXNID txnid, const locktree *lt, const range_buffer &buffer, void *extra);
 
-    struct lt_counters {
+    struct lock_request_counters {
         uint64_t wait_count, wait_time;
         uint64_t long_wait_count, long_wait_time;
         uint64_t timeout_count;
-
-        void add(const lt_counters &rhs) {
-            wait_count += rhs.wait_count;
-            wait_time += rhs.wait_time;
-            long_wait_count += rhs.long_wait_count;
-            long_wait_time += rhs.long_wait_time;
-            timeout_count += rhs.timeout_count;
-        }
     };
 
     typedef int (*lock_request_iterate_callback)(DICTIONARY_ID dict_id,
@@ -131,16 +123,15 @@ namespace toku {
         // For each pending lock request, invoke the callback function.
         int iterate_pending_lock_requests(lock_request_iterate_callback cb, void *extra);
 
-        // Accumulate status counters.
-        const lt_counters &get_counters(void) const;
-        void add_status(uint64_t *cumulative_lock_requests_pending, lt_counters *cumulative_counters);
+        // Get status counters.
+        void get_status(uint64_t *lock_requests_pending, lock_request_counters *counters);
 
     private:
         omt<lock_request *> pending_lock_requests;
         std::atomic_bool pending_is_empty;
         toku_mutex_t mutex;
         bool should_retry_lock_requests;
-        lt_counters counters;
+        lock_request_counters counters;
         std::atomic_ullong retry_want;
         unsigned long long retry_done;
         toku_mutex_t retry_mutex;
@@ -233,14 +224,14 @@ namespace toku {
 
         void kill_waiter(void *extra);
 
+        lock_request_info *get_lock_request_info(void);
+
     private:
         static const uint64_t DEFAULT_MAX_LOCK_MEMORY = 64L * 1024 * 1024;
 
         // tracks the current number of locks and lock memory
         uint64_t m_max_lock_memory;
         std::atomic_uint64_t m_current_lock_memory;
-
-        struct lt_counters m_lt_counters;
 
         // the create and destroy callbacks for the locktrees
         lt_create_cb m_lt_create_callback;
@@ -291,6 +282,8 @@ namespace toku {
         };
 
         locktree_escalator m_escalator;
+
+        lock_request_info m_lock_request_info;
 
         friend class manager_unit_test;
     };
@@ -360,13 +353,6 @@ namespace toku {
 
         DICTIONARY_ID get_dict_id() const;
 
-        // Private info struct for storing pending lock request state.
-        // Only to be used by lock requests. We store it here as
-        // something less opaque than usual to strike a tradeoff between
-        // abstraction and code complexity. It is still fairly abstract
-        // since the lock_request object is opaque 
-        lock_request_info *get_lock_request_info(void);
-
     private:
         locktree_manager *m_mgr;
         DICTIONARY_ID m_dict_id;
@@ -384,7 +370,6 @@ namespace toku {
         concurrent_tree *m_rangetree;
 
         void *m_userdata;
-        lock_request_info m_lock_request_info;
 
         // The following fields and members prefixed with "sto_" are for
         // the single txnid optimization, intended to speed up the case

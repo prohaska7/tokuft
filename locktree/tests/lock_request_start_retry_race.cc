@@ -94,9 +94,12 @@ namespace toku {
 } /* namespace toku */
 
 int main(void) {
+    toku::locktree_manager mgr;
+    mgr.create(nullptr, nullptr, nullptr, nullptr);
+
     toku::locktree lt;
-    DICTIONARY_ID dict_id = {1};
-    lt.create(nullptr, dict_id, toku::dbt_comparator);
+    const DICTIONARY_ID dict_id = {1};
+    lt.create(&mgr, dict_id, toku::dbt_comparator);
 
     const DBT *one = toku::get_dbt(1);
 
@@ -111,6 +114,7 @@ int main(void) {
 
     lt.release_reference();
     lt.destroy();
+    mgr.destroy();
     return 0;
 }
 

@@ -44,14 +44,16 @@ namespace toku {
 // stored in the lock request set as pending.
 void lock_request_unit_test::run(void) {
     int r;
+
+    locktree_manager mgr;
+    mgr.create(nullptr, nullptr, nullptr, nullptr);
+
     locktree lt;
-    lock_request request;
+    const DICTIONARY_ID dict_id = { 1 };
+    lt.create(&mgr, dict_id, dbt_comparator);
 
-    DICTIONARY_ID dict_id = { 1 };
-    lt.create(nullptr, dict_id, dbt_comparator);
-
-    TXNID txnid_a = 1001;
-    TXNID txnid_b = 2001;
+    const TXNID txnid_a = 1001;
+    const TXNID txnid_b = 2001;
 
     const DBT *zero = get_dbt(0);
     const DBT *one = get_dbt(1);
@@ -61,10 +63,11 @@ void lock_request_unit_test::run(void) {
     r = lt.acquire_write_lock(txnid_b, zero, two, nullptr, false);
     invariant_zero(r);
 
-    lock_request_info *info = lt.get_lock_request_info();
+    lock_request_info *info = mgr.get_lock_request_info();
 
     // start a lock request for 1,1
     // it should fail. the request should be stored and in the pending state.
+    lock_request request;
     request.create();
     request.set(&lt, txnid_a, one, one, lock_request::type::WRITE, false);
     r = request.start();
@@ -94,6 +97,7 @@ void lock_request_unit_test::run(void) {
 
     lt.release_reference();
     lt.destroy();
+    mgr.destroy();
 }
 
 } /* namespace toku */

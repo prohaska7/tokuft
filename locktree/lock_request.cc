@@ -106,7 +106,7 @@ void lock_request::set(locktree *lt, TXNID txnid, const DBT *left_key, const DBT
     toku_destroy_dbt(&m_right_key_copy);
     m_type = lock_type;
     m_state = state::INITIALIZED;
-    m_info = lt ? lt->get_lock_request_info() : nullptr;
+    m_info = lt ? lt->get_manager()->get_lock_request_info() : nullptr;
     m_big_txn = big_txn;
     m_extra = extra;
 }
@@ -290,7 +290,7 @@ int lock_request::retry(void) {
 void lock_request::retry_all_lock_requests(
     locktree *lt,
     void (*after_retry_all_test_callback)(void)) {
-    lock_request_info *info = lt->get_lock_request_info();
+    lock_request_info *info = lt->get_manager()->get_lock_request_info();
 
     // if there are no pending lock requests than there is nothing to do
     // the unlocked data race on pending_is_empty is OK since lock requests
@@ -473,16 +473,12 @@ void lock_request_info::kill_waiter_iterate(void *extra) {
     toku_mutex_unlock(&mutex);
 }
 
-const lt_counters& lock_request_info::get_counters(void) const {
-    return counters;
-}
-
-void lock_request_info::add_status(uint64_t *cumulative_lock_requests_pending, lt_counters *cumulative_counters) {
+void lock_request_info::get_status(uint64_t *lock_requests_pending_ptr, lock_request_counters *counters_ptr) {
     if (toku_mutex_trylock(&mutex) == 0) {
-        if (cumulative_lock_requests_pending)
-            *cumulative_lock_requests_pending += pending_lock_requests.size();
-        if (cumulative_counters)
-            cumulative_counters->add(counters);
+        if (lock_requests_pending_ptr)
+            *lock_requests_pending_ptr = pending_lock_requests.size();
+        if (counters_ptr)
+            *counters_ptr = counters;
         toku_mutex_unlock(&mutex);
     }
 }

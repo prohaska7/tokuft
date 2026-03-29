@@ -105,7 +105,7 @@ namespace toku {
         }
 
         // complete lock requests
-        lock_request_info *lrmgr = lt->get_lock_request_info();
+        lock_request_info *lrmgr = mgr.get_lock_request_info();
         for (int i=0; i<n_lock_requests-1; i++) {
             lrmgr->remove_from_pending(&lock_requests[i]);
             lock_requests[i].complete(DB_LOCK_NOTGRANTED);
