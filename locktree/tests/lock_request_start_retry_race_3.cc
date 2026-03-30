@@ -62,7 +62,7 @@ namespace toku {
 
     static void after_retry_all(void) { usleep(10000); }
 
-    static void run_locker(locktree *lt,
+    static void run_locker(locktree_manager *mgr, locktree *lt,
                            TXNID txnid,
                            const DBT *key,
                            pthread_barrier_t *b) {
@@ -92,7 +92,7 @@ namespace toku {
                 buffer.destroy();
 
                 // retry pending lock requests
-                lock_request::retry_all_lock_requests(lt, after_retry_all);
+                mgr->get_lock_request_info()->retry_lock_requests_group(TXNID_NONE, after_retry_all);
             }
 
             request.destroy();
@@ -122,7 +122,7 @@ int main(void) {
     int r = pthread_barrier_init(&b, nullptr, n_workers);
     assert(r == 0);
     for (int i = 0; i < n_workers; i++) {
-        worker[i] = std::thread(toku::run_locker, &lt, i, one, &b);
+        worker[i] = std::thread(toku::run_locker, &mgr, &lt, i, one, &b);
     }
     for (int i = 0; i < n_workers; i++) {
         worker[i].join();

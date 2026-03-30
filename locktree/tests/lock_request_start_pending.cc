@@ -86,7 +86,7 @@ void lock_request_unit_test::run(void) {
 
     // now retry the lock requests.
     // it should transition the request to successfully complete.
-    lock_request::retry_all_lock_requests(&lt);
+    mgr.retry_lock_requests(TXNID_NONE);
     invariant(info->pending_lock_requests.size() == 0);
     invariant(request.m_state == lock_request::state::COMPLETE);
     invariant(request.m_complete_r == 0);

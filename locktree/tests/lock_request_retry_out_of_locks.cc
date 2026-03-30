@@ -80,7 +80,7 @@ namespace toku {
 
         // retry all lock requests, should complete lock request
         // b with a TOKUDB_OUT_OF_LOCKS result
-        lock_request::retry_all_lock_requests(lt);
+        mgr.retry_lock_requests(TXNID_NONE);
 
         assert(b.m_state == lock_request::state::COMPLETE);
         assert(b.m_complete_r == TOKUDB_OUT_OF_LOCKS);

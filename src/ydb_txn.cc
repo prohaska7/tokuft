@@ -61,6 +61,7 @@ static void toku_txn_release_locks(DB_TXN *txn) {
     // modify this data structure while the txn commits.
     toku_mutex_lock(&db_txn_struct_i(txn)->txn_mutex);
 
+    // release locks
     size_t num_ranges = db_txn_struct_i(txn)->lt_map.size();
     for (size_t i = 0; i < num_ranges; i++) {
         txn_lt_key_ranges ranges;
@@ -70,6 +71,12 @@ static void toku_txn_release_locks(DB_TXN *txn) {
     }
 
     toku_mutex_unlock(&db_txn_struct_i(txn)->txn_mutex);
+
+    // if locks were released then retry pending locks
+    if (num_ranges > 0) {
+        TXNID completing_txnid = toku_txn_id64(txn);
+        db_env_struct_i(txn->mgrp)->ltm.retry_lock_requests(completing_txnid);
+    }
 }
 
 static void toku_txn_destroy(DB_TXN *txn) {

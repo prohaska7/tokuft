@@ -453,7 +453,7 @@ void locktree_manager::get_status(LTM_STATUS statp) {
         mutex_unlock();
     }
 
-    struct lock_request_counters counters = {};
+    lock_request_counters counters;
     m_lock_request_info.get_status(&lock_requests_pending, &counters);
 
     LTM_STATUS_VAL(LTM_NUM_LOCKTREES) = num_locktrees;
@@ -475,6 +475,10 @@ void locktree_manager::kill_waiter(void *extra) {
 
 lock_request_info *locktree_manager::get_lock_request_info(void) {
     return &m_lock_request_info;
+}
+
+void locktree_manager::retry_lock_requests(TXNID completing_txnid) {
+    m_lock_request_info.retry_lock_requests_group(completing_txnid);
 }
 
 } /* namespace toku */

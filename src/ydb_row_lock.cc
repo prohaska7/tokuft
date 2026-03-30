@@ -284,10 +284,6 @@ void toku_db_release_lt_key_ranges(DB_TXN *txn, txn_lt_key_ranges *ranges) {
     ranges->buffer->destroy();
     toku_free(ranges->buffer);
 
-    // all of our locks have been released, so first try to wake up
-    // pending lock requests, then release our reference on the lt
-    toku::lock_request::retry_all_lock_requests(lt);
-
     // Release our reference on this locktree
     toku::locktree_manager *ltm = &txn->mgrp->i->ltm;
     ltm->release_lt(lt);

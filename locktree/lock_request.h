@@ -119,15 +119,6 @@ public:
     // return: which txnid is blocking this request (there may be more, though)
     TXNID get_conflicting_txnid(void) const;
 
-    // effect: Retries all of the lock requests for the given locktree.
-    //         Any lock requests successfully restarted is completed and woken
-    //         up.
-    //         The rest remain pending.
-    static void retry_all_lock_requests(
-        locktree *lt,
-        void (*after_retry_test_callback)(void) = nullptr);
-    static void retry_all_lock_requests_info(lock_request_info *info);
-
     void set_start_test_callback(void (*f)(void));
     void set_start_before_pending_test_callback(void (*f)(void));
     void set_retry_test_callback(void (*f)(void));
@@ -135,7 +126,6 @@ public:
     void *get_extra(void) const;
 
     void kill_waiter(void);
-    static void kill_waiter(locktree *lt, void *extra);
 
    private:
     enum state {

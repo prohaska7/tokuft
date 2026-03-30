@@ -126,6 +126,11 @@ namespace toku {
         // Get status counters.
         void get_status(uint64_t *lock_requests_pending, lock_request_counters *counters);
 
+        // Retry pending lock requests
+        void retry_lock_requests_group(TXNID completing_txnid,
+                                       void (*after_retry_test_callback)(void) = nullptr);
+        void retry_lock_requests(void);
+
     private:
         omt<lock_request *> pending_lock_requests;
         std::atomic_bool pending_is_empty;
@@ -225,6 +230,8 @@ namespace toku {
         void kill_waiter(void *extra);
 
         lock_request_info *get_lock_request_info(void);
+
+        void retry_lock_requests(TXNID completing_txnid);
 
     private:
         static const uint64_t DEFAULT_MAX_LOCK_MEMORY = 64L * 1024 * 1024;

@@ -287,72 +287,6 @@ int lock_request::retry(void) {
     return r;
 }
 
-void lock_request::retry_all_lock_requests(
-    locktree *lt,
-    void (*after_retry_all_test_callback)(void)) {
-    lock_request_info *info = lt->get_manager()->get_lock_request_info();
-
-    // if there are no pending lock requests than there is nothing to do
-    // the unlocked data race on pending_is_empty is OK since lock requests
-    // are retried after added to the pending set.
-    if (info->pending_is_empty)
-        return;
-
-    // get my retry generation (post increment of retry_want)
-    unsigned long long my_retry_want = (info->retry_want += 1);
-
-    toku_mutex_lock(&info->retry_mutex);
-
-    // here is the group retry algorithm.
-    // get the latest retry_want count and use it as the generation number of
-    // this retry operation. if this retry generation is > the last retry
-    // generation, then do the lock retries.  otherwise, no lock retries
-    // are needed.
-    if ((my_retry_want - 1) == info->retry_done) {
-        for (;;) {
-            if (!info->running_retry) {
-                info->running_retry = true;
-                info->retry_done = info->retry_want;
-                toku_mutex_unlock(&info->retry_mutex);
-                retry_all_lock_requests_info(info);
-                if (after_retry_all_test_callback)
-                    after_retry_all_test_callback();
-                toku_mutex_lock(&info->retry_mutex);
-                info->running_retry = false;
-                toku_cond_broadcast(&info->retry_cv);
-                break;
-            } else {
-                toku_cond_wait(&info->retry_cv, &info->retry_mutex);
-            }
-        }
-    }
-    toku_mutex_unlock(&info->retry_mutex);
-}
-
-void lock_request::retry_all_lock_requests_info(lock_request_info *info) {
-    toku_mutex_lock(&info->mutex);
-    // retry all of the pending lock requests.
-    for (size_t i = 0; i < info->pending_lock_requests.size();) {
-        lock_request *request;
-        int r = info->pending_lock_requests.fetch(i, &request);
-        invariant_zero(r);
-
-        // retry the lock request. if it didn't succeed,
-        // move on to the next lock request. otherwise
-        // the request is gone from the list so we may
-        // read the i'th entry for the next one.
-        r = request->retry();
-        if (r != 0) {
-            i++;
-        }
-    }
-
-    // future threads should only retry lock requests if some still exist
-    info->should_retry_lock_requests = info->pending_lock_requests.size() > 0;
-
-    toku_mutex_unlock(&info->mutex);
-}
-
 void *lock_request::get_extra(void) const {
     return m_extra;
 }
@@ -403,8 +337,8 @@ void lock_request_info::destroy(void) {
 
 // Invoke callback function on all lock requests in the pending lock request set.
 // If the callback function returns non-zero, then the iteration is complete.
-// Performance note: use an omt iterator since it has less complexity O(log N)
-// compared to this implementation O(N * log N)
+// Performance note: use an omt iterator since it has less complexity O(log n)
+// compared to this implementation O(n log n).
 int lock_request_info::iterate_pending_lock_requests(lock_request_iterate_callback callback,
                                                      void *extra) {
     int r = 0;
@@ -424,14 +358,15 @@ int lock_request_info::iterate_pending_lock_requests(lock_request_iterate_callba
 }
 
 // Find a lock request in the set of pending lock request that matches
-// 'extra' and kill it. The OMT iterator gives the best performance. If
-// an unordered_map from 'extra' to 'lock_request *' were added, then
+// 'extra' and kill it. The 'kill_waiter_iterate' is faster than
+// 'kill_waiter_fetch' since the cost of fetch is O(log n).
+// If an unordered map from 'extra' to 'lock_request *' were added, then
 // the performance could be O(1) at the cost of more code.
 void lock_request_info::kill_waiter(void *extra) {
     kill_waiter_iterate(extra);
 }
 
-// Performance: O(N log N) since OMT fetch is O(log N)
+// Performance: O(n log n) since OMT fetch is O(log n)
 void lock_request_info::kill_waiter_fetch(void *extra) {
     toku_mutex_lock(&mutex);
     for (size_t i = 0; i < pending_lock_requests.size(); i++) {
@@ -462,7 +397,7 @@ static int kill_waiter_match_f(lock_request * const &request, const uint32_t idx
         return 0;
 }
 
-// Performance: O(N + log N) since the OMT iterate is O(N + log N)
+// Performance: O(n + log n) since the OMT iterate is O(n + log n)
 void lock_request_info::kill_waiter_iterate(void *extra) {
     toku_mutex_lock(&mutex);
     kill_waiter_match_d match = { extra };
@@ -568,6 +503,70 @@ bool lock_request_info::cycle_exists(TXNID from, TXNID target) {
         }
     }
     return found_cycle;
+}
+
+void lock_request_info::retry_lock_requests_group(TXNID UU(completing_txnid),
+    void (*after_retry_all_test_callback)(void)) {
+
+    // if there are no pending lock requests than there is nothing to do
+    // the unlocked data race on pending_is_empty is OK since lock requests
+    // are retried after added to the pending set.
+    if (pending_is_empty)
+        return;
+
+    // get my retry generation (post increment of retry_want)
+    unsigned long long my_retry_want = (retry_want += 1);
+
+    toku_mutex_lock(&retry_mutex);
+
+    // here is the group retry algorithm.
+    // get the latest retry_want count and use it as the generation number of
+    // this retry operation. if this retry generation is > the last retry
+    // generation, then do the lock retries.  otherwise, no lock retries
+    // are needed.
+    if ((my_retry_want - 1) == retry_done) {
+        for (;;) {
+            if (!running_retry) {
+                running_retry = true;
+                retry_done = retry_want;
+                toku_mutex_unlock(&retry_mutex);
+                retry_lock_requests();
+                if (after_retry_all_test_callback)
+                    after_retry_all_test_callback();
+                toku_mutex_lock(&retry_mutex);
+                running_retry = false;
+                toku_cond_broadcast(&retry_cv);
+                break;
+            } else {
+                toku_cond_wait(&retry_cv, &retry_mutex);
+            }
+        }
+    }
+    toku_mutex_unlock(&retry_mutex);
+}
+
+void lock_request_info::retry_lock_requests(void) {
+    toku_mutex_lock(&mutex);
+    // retry all of the pending lock requests.
+    for (size_t i = 0; i < pending_lock_requests.size();) {
+        lock_request *request;
+        int r = pending_lock_requests.fetch(i, &request);
+        invariant_zero(r);
+
+        // retry the lock request. if it didn't succeed,
+        // move on to the next lock request. otherwise
+        // the request is gone from the list so we may
+        // read the i'th entry for the next one.
+        r = request->retry();
+        if (r != 0) {
+            i++;
+        }
+    }
+
+    // future threads should only retry lock requests if some still exist
+    should_retry_lock_requests = pending_lock_requests.size() > 0;
+
+    toku_mutex_unlock(&mutex);
 }
 
 } /* namespace toku */

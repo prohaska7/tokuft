@@ -85,7 +85,7 @@ namespace toku {
         assert(b.m_state == lock_request::state::COMPLETE);
 
         // retry pending lock requests
-        lock_request::retry_all_lock_requests(lt);
+        mgr.retry_lock_requests(TXNID_NONE);
 
         // a releases large key
         locktree_release_lock(lt, txn_a, large_dbt_ptr, large_dbt_ptr);

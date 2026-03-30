@@ -57,7 +57,7 @@ private:
     void release_lock_and_retry_requests(locktree *lt,
             TXNID txnid, const DBT *left_key, const DBT * right_key) {
         locktree_unit_test::locktree_test_release_lock(lt, txnid, left_key, right_key);
-        lock_request::retry_all_lock_requests(lt);
+        lt->get_manager()->retry_lock_requests(TXNID_NONE);
     }
 };
 
