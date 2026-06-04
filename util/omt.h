@@ -619,6 +619,10 @@ public:
      */
     size_t memory_size(void);
 
+    void convert_to_array(void);
+
+    void convert_to_tree(void);
+
 private:
     typedef uint32_t node_idx;
     typedef omt_internal::subtree_templated<supports_marks> subtree;
@@ -662,12 +666,8 @@ private:
     __attribute__((nonnull))
     void fill_array_with_subtree_values(omtdata_t *const array, const subtree &subtree) const;
 
-    void convert_to_array(void);
-
     __attribute__((nonnull))
     void rebuild_from_sorted_array(subtree *const subtree, const omtdata_t *const values, const uint32_t numvalues);
-
-    void convert_to_tree(void);
 
     void maybe_resize_or_convert(const uint32_t n);
 
