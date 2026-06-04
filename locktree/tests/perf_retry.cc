@@ -36,15 +36,17 @@ Copyright (c) 2006, 2015, Percona and/or its affiliates. All rights reserved.
 
 #ident "Copyright (c) 2006, 2015, Percona and/or its affiliates. All rights reserved."
 
-// Measure the performance of the deadlock detector versus the pending
+// Measure the performance of the lock retry versus the pending
 // lock request set size.  The pending requests form a single dependency
 // chain.
 
 #include "lock_request_unit_test.h"
 
 int n_lock_requests = 2;
-int n_extra = 0;
 int n_tests = 1;
+int convert_to_tree = 1;
+int do_iterate = 0;
+int match = 0;
 
 namespace toku {
 
@@ -63,7 +65,7 @@ namespace toku {
         locktree *lt = mgr.get_lt({1}, dbt_comparator, nullptr);
 
         // init lock requests
-        lock_request *lock_requests = new lock_request[n_lock_requests + n_extra];
+        lock_request *lock_requests = new lock_request[n_lock_requests];
         for (int i=0; i<n_lock_requests; i++) {
             lock_requests[i].create();
         }
@@ -85,15 +87,6 @@ namespace toku {
             assert(lock_requests[i].m_state == lock_request::state::COMPLETE);
         }
 
-        // lock extra 
-        for (int i=n_lock_requests; i<n_lock_requests + n_extra; i++) {
-            lock_requests[i].set(lt, (TXNID) {(uint64_t)(i+1)}, &keys[0].dbt, &keys[0].dbt,
-                                 lock_request::type::WRITE, false);
-            r = lock_requests[i].start();
-            assert(r == DB_LOCK_NOTGRANTED);
-            assert(lock_requests[i].m_state == lock_request::state::PENDING);
-        }
-
         // try to lock adjacent keys
         for (int i=0; i<n_lock_requests-1; i++) {
             lock_requests[i].set(lt, (TXNID) {(uint64_t)(i+1)}, &keys[i+1].dbt, &keys[i+1].dbt,
@@ -103,26 +96,32 @@ namespace toku {
             assert(lock_requests[i].m_state == lock_request::state::PENDING);
         }
 
+        lock_request_info *lrmgr = mgr.get_lock_request_info();
+        if (convert_to_tree)
+            lrmgr->pending_lock_requests.convert_to_tree();
+
         // perf loop
-        // note that deadlock detector runs in the start function
+        txnid_set completing_txnids;
+        completing_txnids.create();
+        if (match == 0)
+            completing_txnids.add((TXNID) {(uint64_t)(n_lock_requests+1)}); // match none
+        else if (match == 1)
+            completing_txnids.add((TXNID) {(uint64_t)(0+1)}); // match one
+        else
+            completing_txnids.add(TXNID_NONE); // match all
+
+        // perf loop
         for (int i=0; i<n_tests; i++) {
-            lock_requests[n_lock_requests-1].set(lt, (TXNID) {(uint64_t)(n_lock_requests)},
-                                                 &keys[0].dbt, &keys[0].dbt,
-                                                 lock_request::type::WRITE, false);
-            r = lock_requests[n_lock_requests-1].start();
-            assert(r == DB_LOCK_DEADLOCK);
-            assert(lock_requests[n_lock_requests-1].m_state == lock_request::state::COMPLETE);
+            if (do_iterate)
+                lrmgr->retry_lock_requests_iterate(&completing_txnids);
+            else
+                lrmgr->retry_lock_requests_fetch(&completing_txnids);
         }
+
+        completing_txnids.destroy();
 
         // complete lock requests
-        lock_request_info *lrmgr = mgr.get_lock_request_info();
         for (int i=0; i<n_lock_requests-1; i++) {
-            lrmgr->remove_from_pending(&lock_requests[i]);
-            lock_requests[i].complete(DB_LOCK_NOTGRANTED);
-        }
-
-        // complete extra
-        for (int i=n_lock_requests; i < n_lock_requests + n_extra; i++) {
             lrmgr->remove_from_pending(&lock_requests[i]);
             lock_requests[i].complete(DB_LOCK_NOTGRANTED);
         }
@@ -137,7 +136,7 @@ namespace toku {
         }
 
         // cleanup
-        for (int i=0; i<n_lock_requests + n_extra; i++) {
+        for (int i=0; i<n_lock_requests; i++) {
             lock_requests[i].destroy();
         }
 
@@ -152,8 +151,11 @@ namespace toku {
 
 static void print_usage(void) {
     fprintf(stderr, "-n N_LOCK_REQUESTS (default=%d)\n", n_lock_requests);
-    fprintf(stderr, "-e N_EXTRA (default=%d)\n", n_extra);
-    fprintf(stderr, "-t N_TESTS (default=%d)\n", n_tests);            
+    fprintf(stderr, "-t N_TESTSS (default=%d)\n", n_tests);
+    fprintf(stderr, "-c CONVERT_TO_TREE (default=%d)\n", convert_to_tree);
+    fprintf(stderr, "-i DO_ITERATE (default=%d)\n", do_iterate);
+    fprintf(stderr, "-m MATCH (default=%d)\n", match);
+    fprintf(stderr, "0 -> retry none, 1 -> retry one, 2 -> retry all\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -162,22 +164,29 @@ int main(int argc, char *argv[]) {
             n_lock_requests = atoi(argv[++i]);
             continue;
         }
-        if (strcmp(argv[i], "-e") == 0 && i+1 < argc) {
-            n_extra = atoi(argv[++i]);
-            continue;
-        }
         if (strcmp(argv[i], "-t") == 0 && i+1 < argc) {
             n_tests = atoi(argv[++i]);
+            continue;
+        }
+        if (strcmp(argv[i], "-c") == 0 && i+1 < argc) {
+            convert_to_tree = atoi(argv[++i]);
+            continue;
+        }
+        if (strcmp(argv[i], "-i") == 0 && i+1 < argc) {
+            do_iterate = atoi(argv[++i]);
+            continue;
+        }
+        if (strcmp(argv[i], "-m") == 0 && i+1 < argc) {
+            match = atoi(argv[++i]);
             continue;
         }
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-?") == 0) {
             print_usage();
             return 1;
-        }        
+        }
     }
     assert(n_lock_requests > 1);
-    assert(n_extra >= 0);
-    assert(n_tests >= 0);
+    assert(n_tests > 0);
     toku::lock_request_unit_test test;
     test.run();
     return 0;

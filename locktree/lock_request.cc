@@ -256,6 +256,10 @@ TXNID lock_request::get_conflicting_txnid(void) const {
     return m_conflicts.get(0);
 }
 
+const txnid_set *lock_request::get_conflicts(void) const {
+    return &m_conflicts;
+}
+
 int lock_request::retry(void) {
     invariant(m_state == state::PENDING);
     int r;
@@ -314,20 +318,26 @@ void lock_request_info::init(void) {
     pending_is_empty = true;
     ZERO_STRUCT(mutex);
     toku_mutex_init(*locktree_request_info_mutex_key, &mutex, nullptr);
-    retry_want = retry_done = 0;
+    retry_set = 0;
+    retry_running = false;
+    retry_waiting = false;
+    for (int i=0; i<2; i++)
+        retry_complete_set[i].create();
     ZERO_STRUCT(counters);
     ZERO_STRUCT(retry_mutex);
     toku_mutex_init(
         *locktree_request_info_retry_mutex_key, &retry_mutex, nullptr);
     toku_cond_init(*locktree_request_info_retry_cv_key, &retry_cv, nullptr);
-    running_retry = false;
-
     TOKU_VALGRIND_HG_DISABLE_CHECKING(&pending_is_empty,
                                       sizeof(pending_is_empty));
     TOKU_DRD_IGNORE_VAR(pending_is_empty);
 }
 
 void lock_request_info::destroy(void) {
+    for (int i=0; i<2; i++) {
+        invariant(retry_complete_set[i].size() == 0);
+        retry_complete_set[i].destroy();
+    }
     invariant(pending_lock_requests.size() == 0);
     pending_lock_requests.destroy();
     toku_mutex_destroy(&mutex);
@@ -410,11 +420,12 @@ void lock_request_info::kill_waiter_iterate(void *extra) {
 
 void lock_request_info::get_status(uint64_t *lock_requests_pending_ptr, lock_request_counters *counters_ptr) {
     if (toku_mutex_trylock(&mutex) == 0) {
-        if (lock_requests_pending_ptr)
-            *lock_requests_pending_ptr = pending_lock_requests.size();
-        if (counters_ptr)
-            *counters_ptr = counters;
+        *lock_requests_pending_ptr = pending_lock_requests.size();
+        *counters_ptr = counters;
         toku_mutex_unlock(&mutex);
+    } else {
+        *lock_requests_pending_ptr = 0;
+        *counters_ptr = {};
     }
 }
 
@@ -505,68 +516,164 @@ bool lock_request_info::cycle_exists(TXNID from, TXNID target) {
     return found_cycle;
 }
 
-void lock_request_info::retry_lock_requests_group(TXNID UU(completing_txnid),
-    void (*after_retry_all_test_callback)(void)) {
+// Retry pending lock requests with groups of completing transaction id's.
+// This amortizes the cost of reassigning lock ownership to the appropriate
+// pending lock requests over multiple completing transactions.
+// This implementation uses 2 sets of completing transactions id's: one set
+// is currently being used for lock retries and the other set used to accumulate
+// completing transactions id's for the next cycle of lock retries.
+// The lock retries are done by one of the calling threads that grabs
+// the 'retry_running' flag first.  A second thread that grabs the 'retry_waiting'
+// flag will become the next running thread.  All other threads deposit
+// their transaction id into the next retry completion set.
+// Alternative design: feed the lock retry work to a set of background threads.
+void lock_request_info::retry_lock_requests_group(TXNID completing_txnid,
+    void (*after_retry_test_callback)(const txnid_set *)) {
 
     // if there are no pending lock requests than there is nothing to do
     // the unlocked data race on pending_is_empty is OK since lock requests
     // are retried after added to the pending set.
-    if (pending_is_empty)
+    if (pending_is_empty) {
+        // printf("e");
         return;
+    }
 
-    // get my retry generation (post increment of retry_want)
-    unsigned long long my_retry_want = (retry_want += 1);
+    // Test
+    if (0) {
+        retry_lock_requests(nullptr);
+        return;
+    }
 
     toku_mutex_lock(&retry_mutex);
 
-    // here is the group retry algorithm.
-    // get the latest retry_want count and use it as the generation number of
-    // this retry operation. if this retry generation is > the last retry
-    // generation, then do the lock retries.  otherwise, no lock retries
-    // are needed.
-    if ((my_retry_want - 1) == retry_done) {
-        for (;;) {
-            if (!running_retry) {
-                running_retry = true;
-                retry_done = retry_want;
-                toku_mutex_unlock(&retry_mutex);
-                retry_lock_requests();
-                if (after_retry_all_test_callback)
-                    after_retry_all_test_callback();
-                toku_mutex_lock(&retry_mutex);
-                running_retry = false;
-                toku_cond_broadcast(&retry_cv);
-                break;
-            } else {
-                toku_cond_wait(&retry_cv, &retry_mutex);
-            }
+    // Add the completing transaction id to the next retry set.
+    retry_complete_set[retry_set].add(completing_txnid);
+
+    // Try to run the lock retries.
+    if (retry_running && !retry_waiting) {
+            // printf(".");
+            retry_waiting = true;
+            toku_cond_wait(&retry_cv, &retry_mutex);
+            retry_waiting = false;
+    }
+    
+    // printf("s");
+    if (!retry_running && !retry_waiting) {
+        retry_running = true;
+        txnid_set *completed_txns = &retry_complete_set[retry_set];
+        retry_set ^= 1; // switch completion sets
+        toku_mutex_unlock(&retry_mutex);
+        
+        retry_lock_requests(completed_txns);
+        if (after_retry_test_callback)
+            after_retry_test_callback(completed_txns);
+        
+        toku_mutex_lock(&retry_mutex);
+        // printf("d");
+        completed_txns->clear();
+        if (retry_waiting) {
+            toku_cond_broadcast(&retry_cv);
         }
+        retry_running = false;
+    } else {
+        ; // printf("0");
     }
     toku_mutex_unlock(&retry_mutex);
 }
 
-void lock_request_info::retry_lock_requests(void) {
+void lock_request_info::retry_lock_requests(txnid_set *completing_txnids) {
+    retry_lock_requests_iterate(completing_txnids);
+}
+
+// Retry pending lock requests using an OMT fetch loop.  The lock requests selected
+// are those whose conflicts contains one of the completing transactions id's.
+// Performance: O(n log n) since OMT fetch is O(n).
+void lock_request_info::retry_lock_requests_fetch(txnid_set *completing_txnids) {
     toku_mutex_lock(&mutex);
-    // retry all of the pending lock requests.
     for (size_t i = 0; i < pending_lock_requests.size();) {
         lock_request *request;
         int r = pending_lock_requests.fetch(i, &request);
         invariant_zero(r);
 
-        // retry the lock request. if it didn't succeed,
-        // move on to the next lock request. otherwise
-        // the request is gone from the list so we may
-        // read the i'th entry for the next one.
-        r = request->retry();
-        if (r != 0) {
-            i++;
+        bool do_retry;
+        if (completing_txnids == nullptr) {
+            // retry all
+            do_retry = true;
+        } else {
+            // retry requests with conflicts with any completing_txnids
+            do_retry = false;
+            for (size_t j = 0; j < completing_txnids->size(); j++) {
+                TXNID completing_txnid = completing_txnids->get(j);
+                if (completing_txnid == TXNID_NONE || request->m_conflicts.contains(completing_txnid)) {
+                    do_retry = true;
+                    break;
+                }
+            }
         }
+        if (do_retry) {
+            // retry the lock request. if it didn't succeed,
+            // move on to the next lock request. otherwise
+            // the request is gone from the list so we may
+            // read the i'th entry for the next one.
+            r = request->retry();
+            if (r != 0) {
+                i++;
+            }
+        } else
+            i++; // filtering request, go to the next one
     }
 
-    // future threads should only retry lock requests if some still exist
-    should_retry_lock_requests = pending_lock_requests.size() > 0;
+    toku_mutex_unlock(&mutex);
+}
+
+struct retry_lock_match_d {
+    txnid_set *completing_txnids;
+    GrowableArray<lock_request *> reqs;
+};
+
+static int retry_lock_match_f(lock_request * const &request, const uint32_t UU(idx), retry_lock_match_d *const match) {
+    bool do_retry;
+    if (match->completing_txnids == nullptr) {
+        // retry all
+        do_retry = true;
+    } else {
+        // retry requests with conflicts with any completing_txnids
+        do_retry = false;
+        for (size_t i = 0; i < match->completing_txnids->size(); i++) {
+            TXNID completing_txnid = match->completing_txnids->get(i);
+            if (completing_txnid == TXNID_NONE || request->get_conflicts()->contains(completing_txnid)) {
+                do_retry = true;
+                break;
+            }
+        }
+    }
+    if (do_retry) {
+        match->reqs.push(request);
+    }
+    return 0;
+}
+
+// Retry pending lock requests using an OMT iterator.  The lock requests selected
+// are those whose conflicts contains one of the completing transactions id's.
+// Performance: O(n + log n) since OMT iterate is O(n + log n).
+void lock_request_info::retry_lock_requests_iterate(txnid_set *completing_txnids) {
+    // find matching lock requests
+    retry_lock_match_d match;
+    match.completing_txnids = completing_txnids;
+    match.reqs.init();
+
+    toku_mutex_lock(&mutex);
+    int r = pending_lock_requests.iterate<retry_lock_match_d, retry_lock_match_f>(&match);
+    assert(r == 0);
+
+    // retry matching lock requests
+    for (size_t i=0; i < match.reqs.get_size(); i++) {
+        lock_request *request = match.reqs.fetch_unchecked(i);
+        r = request->retry();
+    }
 
     toku_mutex_unlock(&mutex);
+    match.reqs.deinit();
 }
 
 } /* namespace toku */

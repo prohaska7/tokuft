@@ -118,6 +118,7 @@ public:
 
     // return: which txnid is blocking this request (there may be more, though)
     TXNID get_conflicting_txnid(void) const;
+    const txnid_set *get_conflicts(void) const;
 
     void set_start_test_callback(void (*f)(void));
     void set_start_before_pending_test_callback(void (*f)(void));

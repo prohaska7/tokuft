@@ -126,22 +126,24 @@ namespace toku {
         // Get status counters.
         void get_status(uint64_t *lock_requests_pending, lock_request_counters *counters);
 
-        // Retry pending lock requests
+        // Retry pending lock requests.
         void retry_lock_requests_group(TXNID completing_txnid,
-                                       void (*after_retry_test_callback)(void) = nullptr);
-        void retry_lock_requests(void);
+                                       void (*after_retry_test_callback)(const txnid_set *completing_txnids) = nullptr);
+        void retry_lock_requests(txnid_set *completing_txnids);
+        void retry_lock_requests_fetch(txnid_set *completing_txnids);
+        void retry_lock_requests_iterate(txnid_set *completing_txnids);
 
     private:
         omt<lock_request *> pending_lock_requests;
-        std::atomic_bool pending_is_empty;
         toku_mutex_t mutex;
-        bool should_retry_lock_requests;
         lock_request_counters counters;
-        std::atomic_ullong retry_want;
-        unsigned long long retry_done;
         toku_mutex_t retry_mutex;
         toku_cond_t retry_cv;
-        bool running_retry;
+        unsigned int retry_set;
+        txnid_set retry_complete_set[2];
+        bool retry_running;
+        bool retry_waiting;
+        std::atomic_bool pending_is_empty;
 
         // Determine if a cycle exists in the pending lock requests originating from
         // from and terminating in target.

@@ -44,96 +44,147 @@ Copyright (c) 2006, 2015, Percona and/or its affiliates. All rights reserved.
 #include "locktree.h"
 #include "test.h"
 
-// Suppose that 3 threads are running a lock acquire, release, retry sequence.
-// There is a race in the retry algorithm with 2 threads running lock retry
-// simultaneously.  The first thread to run retry sets a flag that will cause
-// the second thread to skip the lock retries. If the first thread progressed
-// past the contended lock, then the second thread will HANG until its lock timer
-// pops, even when the contended lock is no longer held.
+std::atomic_ulong n_retry_group_calls;
+std::atomic_ulong n_retry_scans;
+const int N = 32;
+std::atomic_uint group_size[N];
 
-// This test exposes this problem as a test hang.  The group retry algorithm
-// fixes the race in the lock request retry algorihm and this test should no
-// longer hang.
+static void test_callback([[maybe_unused]] const toku::txnid_set *completed_txns) {
+    int r = completed_txns->size();
+    if (r >= N)
+        group_size[N-1]++;
+    else
+        group_size[r]++;
+    n_retry_scans++;
+}
 
 namespace toku {
+    static int n_tests = 1000;
+    static int n_workers = 3;
+    static int debug = 0;
+    static int n_keys = 1;
 
-    // use 1000 when after_retry_all is implemented, otherwise use 100000
-    static const int n_tests = 1000;  // 100000;
+    struct test_key {
+        int64_t k;
+        DBT dbt;
+    };
 
-    static void after_retry_all([[maybe_unused]] const txnid_set *completed_txns) {
-        usleep(10000);
-    }
+    static test_key *keys = nullptr;
 
-    static void run_locker(locktree_manager *mgr, locktree *lt,
-                           TXNID txnid,
-                           const DBT *key,
-                           pthread_barrier_t *b) {
+    static void run_locker(locktree_manager *mgr, locktree *lt, TXNID txnid) {
+        int r;
+        int n_waits = 0;
         for (int i = 0; i < n_tests; i++) {
-            int r;
-            r = pthread_barrier_wait(b);
-            assert(r == 0 || r == PTHREAD_BARRIER_SERIAL_THREAD);
+            int rkey = random() % n_keys;
 
             lock_request request;
             request.create();
-
-            request.set(lt, txnid, key, key, lock_request::type::WRITE, false);
+            request.set(lt, txnid, &keys[rkey].dbt, &keys[rkey].dbt, lock_request::type::WRITE, false);
 
             // try to acquire the lock
             r = request.start();
             if (r == DB_LOCK_NOTGRANTED) {
+                n_waits += 1;
                 // wait for the lock to be granted
                 r = request.wait(1000 * 1000);
-                assert(r == 0);
+                if (r != 0)
+                    std::cerr << std::this_thread::get_id() << " wait r=" << r << std::endl;
             }
 
             if (r == 0) {
+                // do something with the key
+                toku_pthread_yield();
+                
                 // release the lock
                 range_buffer buffer;
                 buffer.create();
-                buffer.append(key, key);
+                buffer.append(&keys[rkey].dbt, &keys[rkey].dbt);
                 lt->release_locks(txnid, &buffer);
                 buffer.destroy();
 
                 // retry pending lock requests
-                mgr->get_lock_request_info()->retry_lock_requests_group(TXNID_NONE, after_retry_all);
+                mgr->get_lock_request_info()->retry_lock_requests_group(txnid, test_callback);
+                n_retry_group_calls++;
             }
 
             request.destroy();
 
             toku_pthread_yield();
-            if ((i % 10) == 0)
+            if (debug && (i % 10) == 0)
                 std::cerr << std::this_thread::get_id() << " " << i
                           << std::endl;
         }
+
+        std::cerr << std::this_thread::get_id() << " waits=" << n_waits << std::endl;
     }
 
 } /* namespace toku */
 
-int main(void) {
-    toku::locktree_manager mgr;
+static void print_usage(void) {
+}
+
+using namespace toku;
+
+int main(int argc, char *argv[]) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-t") == 0 && i+1 < argc) {
+            n_tests = atoi(argv[++i]);
+            continue;
+        }
+        if (strcmp(argv[i], "-w") == 0 && i+1 < argc) {
+            n_workers = atoi(argv[++i]);
+            continue;
+        }
+        if (strcmp(argv[i], "-d") == 0 && i+1 < argc) {
+            debug = atoi(argv[++i]);
+            continue;
+        }
+        if (strcmp(argv[i], "-k") == 0 && i+1 < argc) {
+            n_keys = atoi(argv[++i]);
+            continue;
+        }
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-?") == 0) {
+            print_usage();
+            return 1;
+        }
+    }
+
+    locktree_manager mgr;
     mgr.create(nullptr, nullptr, nullptr, nullptr);
 
-    toku::locktree lt;
+    locktree lt;
     const DICTIONARY_ID dict_id = {1};
-    lt.create(&mgr, dict_id, toku::dbt_comparator);
+    lt.create(&mgr, dict_id, dbt_comparator);
 
-    const DBT *one = toku::get_dbt(1);
-
-    const int n_workers = 3;
-    std::thread worker[n_workers];
-    pthread_barrier_t b;
-    int r = pthread_barrier_init(&b, nullptr, n_workers);
-    assert(r == 0);
-    for (int i = 0; i < n_workers; i++) {
-        worker[i] = std::thread(toku::run_locker, &mgr, &lt, i, one, &b);
+    // init keys
+    keys = new test_key[n_keys];
+    for (int i=0; i<n_keys; i++) {
+        keys[i].k = i;
+        toku_fill_dbt(&keys[i].dbt, &keys[i].k, sizeof keys[i].k);
+        keys[i].dbt.flags = DB_DBT_USERMEM;
     }
+
+    // start workers
+    std::thread worker[n_workers];
+    for (int i = 0; i < n_workers; i++) {
+        worker[i] = std::thread(run_locker, &mgr, &lt, i);
+    }
+
+    // cleanup workers
     for (int i = 0; i < n_workers; i++) {
         worker[i].join();
     }
-    r = pthread_barrier_destroy(&b);
-    assert(r == 0);
+
+    delete [] keys;
     lt.release_reference();
     lt.destroy();
     mgr.destroy();
+
+    printf("n_retry_group_calls=%lu\n", n_retry_group_calls.load());
+    printf("n_retry_scans=%lu\n", n_retry_scans.load());
+    for (int i = 0; i < N; i++) {
+        if (group_size[i] > 0)
+            printf("group %d size %u\n", i, group_size[i].load());
+    }
     return 0;
 }
