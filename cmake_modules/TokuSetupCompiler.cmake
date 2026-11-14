@@ -147,6 +147,7 @@ if (CMAKE_CXX_COMPILER_ID MATCHES Clang)
     -Wno-vla-cxx-extension
     -Wno-unused-but-set-variable
     -Wno-compound-token-split-by-macro
+    -Wno-uninitialized-const-pointer
   )
 endif ()
 
