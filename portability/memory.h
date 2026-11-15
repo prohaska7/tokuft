@@ -67,6 +67,18 @@ Copyright (c) 2006, 2015, Percona and/or its affiliates. All rights reserved.
 #endif  // __SANITIZE_ADDRESS__
 #endif  // __clang__
 
+#if defined(__clang__)
+#if defined(__has_feature)
+#if __has_feature(memory_sanitizer)
+#define UNDER_MSAN 1
+#endif  // __has_feature(memory_sanitizer)
+#endif  // defined(__has_feature)
+#else   // __clang__
+#ifdef __SANITIZE_MEMORY__
+#define UNDER_MSAN 1
+#endif  // __SANITIZE_ADDRESS__
+#endif  // __clang__
+
 /* Percona memory allocation functions and macros.
  * These are functions for malloc and free */
 
